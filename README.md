@@ -6,7 +6,7 @@ The angle: **the agent acts as whoever steered it.** Every action records the hu
 
 ## Status
 
-Steps 1 to 4 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it and whose name its actions carry.
+Steps 1 to 5 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it, whose name its actions carry, and a note for whoever takes over.
 
 | Step | What | State |
 |---|---|---|
@@ -14,8 +14,8 @@ Steps 1 to 4 of 6 are built: a durable agent loop on an append-only event log, s
 | 2 | Live fan-out to clients (SSE), presence, late-join replay | done |
 | 3 | Driver role, suggestions, pause, withdrawal, conflict tests | done |
 | 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | done |
-| 5 | Handoff summaries | next |
-| 6 | Two-window demo and conflict write-up | |
+| 5 | Handoff summaries | done |
+| 6 | Two-window demo and conflict write-up | next |
 
 ## How it works
 
@@ -67,6 +67,15 @@ approval({ branch }, { defaultBranch }) {
 ```
 
 The worker appends `approval_requested` instead of running the call, and it sits there until someone decides. `allowSelf: false` means the person who steered cannot approve their own push, so a push to main always takes two people. Roles are checked when the approval is *granted*, not when it is requested, so demoting someone mid-flight takes effect. A denial reaches the model as the tool's result, with the reason, so the agent can try another way. Pausing cancels pending approvals along with the calls they belong to, and a decision is taken under the session row lock, so an approve and a deny racing each other resolve to exactly one.
+
+**Handoff notes.** Whoever takes the wheel gets a note, asked for in the same transaction as the handoff so none is ever missed, and anyone can ask for one with **Catch me up**. A note has two parts that are kept apart on purpose:
+
+- **Facts, computed from the log**: who is driving and what the agent is doing, approvals and suggestions waiting, instructions, handoffs, commits, pushes, PRs, files changed, failures and denials, each linked to the event it came from. No model is involved, so these are exact.
+- **A short narrative from the model**: goal, done, in flight, watch out for. It must cite the events it relies on as `[#12]`, and any citation to an event the note never saw is removed before it is stored, so every link in a note goes somewhere real.
+
+A returning driver's note covers what happened since they last held the wheel; a catch-up covers what happened since that browser's last visit. If nothing happened, the note says so without calling the model.
+
+Notes are written while the agent keeps working, which is the case the plan flagged as hard. They are written by the worker beside the agent loop, not inside it: a note takes its own claim (`summary_claims`) instead of the session lease, so the agent never waits for it, and it never counts as a control event, so a note landing mid-model-call never makes the agent throw that call away. Each note records `upToSeq`, the last event it read, and the client shows how much has happened since ("5 events happened after this note, starting at #17") instead of letting a note pass for current. Notes stay out of the agent's own conversation. Two workers racing for the same request produce one note: the claim keeps the second from calling the model, and the append checks under the session lock that no note exists yet. A worker that dies mid-note lets its claim expire, and a model failure is recorded as `summary_failed` rather than retried forever.
 
 ## Run it
 
@@ -137,6 +146,17 @@ Everything runs against a real Postgres, with a scripted model in place of Claud
 - a push to any other branch isn't gated
 - the HTTP API enforces the same rules, and a server with no key refuses to store a token
 - only maintainers change roles, the last maintainer can't be demoted, and viewers can watch but not steer
+
+`test/handoff.test.ts`, handoff notes:
+
+- every handoff (passed or claimed) asks for a note for the new driver in the same transaction; a returning driver's covers only what happened while they were away
+- the note is written while the new driver sets the agent to work: the agent is not held up, the note covers exactly the log as it stood when it started, and everything after shows as newer
+- a note landing while the model is mid-call doesn't make the agent discard that call
+- notes never reach the agent's conversation
+- one note per request: a second worker leaves a claimed request alone, an expired claim is taken over, and two writers past the claim still append once
+- citations to events the note never saw are dropped
+- the facts (commits by Alice then Bob, a push, a pending approval to main, Carol's suggestion) come from the log, whatever the model writes
+- nothing happened means no model call; a failed note is recorded and can be asked for again; anyone, viewers included, can ask to catch up, and asking twice doesn't double up
 
 `test/stream.test.ts`, streaming and presence over real HTTP:
 

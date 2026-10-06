@@ -54,3 +54,15 @@ dialog h3 { margin: 0; }
 dialog p { margin: 0; color: var(--muted); font-size: 13px; }
 dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
+.note .msg { border: 1px solid var(--accent); background: var(--card); }
+.note .prose { white-space: pre-wrap; }
+.facts { margin-top: 8px; font-size: 13px; }
+.facts summary { color: var(--muted); cursor: pointer; }
+.facts dl { margin: 4px 0 0; }
+.facts dt { font-weight: 600; margin-top: 4px; }
+.facts dd { margin: 0 0 0 12px; }
+.since { margin-top: 8px; font-size: 12px; color: var(--muted); }
+a.cite { color: var(--accent); font-size: 12px; text-decoration: none; }
+a.cite:hover { text-decoration: underline; }
+.ev.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 25%, transparent); } to { background: transparent; } }

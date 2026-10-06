@@ -5,6 +5,7 @@ import { EVENTS_CHANNEL } from "./events.js";
 import { ClaudeModel } from "./model.js";
 import { sessionsNeedingWork } from "./sessions.js";
 import { gitTools } from "./git-tools.js";
+import { sessionsNeedingSummaries, writeSummaries, type SummaryDeps } from "./handoff.js";
 import { fileTools, registry } from "./tools.js";
 import { driveSession, type WorkerDeps } from "./worker.js";
 
@@ -20,6 +21,23 @@ const deps: WorkerDeps = {
   workerId: `${hostname()}:${process.pid}`,
   workspaceRoot: process.env.WORKSPACE_ROOT ?? "workspaces",
 };
+
+// Handoff notes run beside the agent loop, with their own claims, so a note
+// for a session never waits for (or holds up) the agent working on it.
+const summaryDeps: SummaryDeps = { db, model: deps.model, workerId: deps.workerId };
+const writingNotes = new Set<string>();
+async function notes(sessionId: string) {
+  if (writingNotes.has(sessionId)) return;
+  writingNotes.add(sessionId);
+  try {
+    const n = await writeSummaries(summaryDeps, sessionId);
+    if (n) console.log(`session ${sessionId}: wrote ${n} handoff note${n === 1 ? "" : "s"}`);
+  } catch (err) {
+    console.error(`session ${sessionId} notes failed:`, err);
+  } finally {
+    writingNotes.delete(sessionId);
+  }
+}
 
 const running = new Set<string>();
 async function drive(sessionId: string) {
@@ -37,6 +55,7 @@ async function drive(sessionId: string) {
 
 async function sweep() {
   for (const id of await sessionsNeedingWork(db)) void drive(id);
+  for (const id of await sessionsNeedingSummaries(db)) void notes(id);
 }
 
 const listener = await db.connect();

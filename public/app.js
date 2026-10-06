@@ -21,6 +21,11 @@ function resetState() {
     nodes: new Map(), // seq -> rendered element, for later status changes
     watchers: [],
     roles: new Map(), // user -> role; anyone unlisted is a member
+    lastSeq: 0,
+    workSeqs: [], // seqs of everything except handoff notes, to count what is newer than a note
+    notes: [], // written notes: { upToSeq, since: element }
+    noteRequests: new Map(), // requestSeq -> { node, reason }, until the note arrives
+    lastVisit: 0, // highest seq this browser had seen before this visit
     approvals: new Map(), // toolUseId -> pending approval request, plus its seq
   };
 }
@@ -129,11 +134,29 @@ $("pass-btn").addEventListener("click", () => act("driver", { to: $("pass-to").v
 $("pause").addEventListener("click", () => act("pause"));
 $("resume").addEventListener("click", () => act("resume"));
 $("role-btn").addEventListener("click", () => act("roles", { user: $("role-user").value, role: $("role-value").value }));
+$("catch-up").addEventListener("click", () => act("summaries", { sinceSeq: s.lastVisit }));
+
+// Remembers how far you got in each session, so "Catch me up" can cover
+// just what happened since your last visit.
+const seenKey = () => `seen:${sessionId}`;
+function rememberSeen(seq) {
+  try {
+    if (seq > (Number(localStorage.getItem(seenKey())) || 0)) localStorage.setItem(seenKey(), String(seq));
+  } catch {}
+}
+function lastVisit() {
+  try {
+    return Number(localStorage.getItem(seenKey())) || 0;
+  } catch {
+    return 0;
+  }
+}
 
 function open() {
   void loadMe().catch(() => {});
   source?.close();
   resetState();
+  s.lastVisit = sessionId ? lastVisit() : 0;
   $("log").replaceChildren();
   $("watchers").replaceChildren();
   const ready = Boolean(me && sessionId);
@@ -163,8 +186,10 @@ function el(tag, cls, text) {
   return n;
 }
 
+let renderingSeq = null;
 function line(cls, meta, body, seq) {
   const n = el("div", `ev ${cls}`);
+  if (renderingSeq != null) n.dataset.seq = renderingSeq;
   const head = el("div", "meta", meta);
   n.append(head, body);
   $("log").append(n);
@@ -182,7 +207,13 @@ function mark(seq, cls, tag) {
 }
 
 function render(e) {
-  s.lastEvent = e;
+  renderingSeq = e.seq;
+  s.lastSeq = e.seq;
+  rememberSeen(e.seq);
+  if (!e.type.startsWith("summary_")) {
+    s.lastEvent = e;
+    s.workSeqs.push(e.seq);
+  }
   const time = new Date(e.createdAt).toLocaleTimeString();
   const forWhom = e.onBehalfOf ? ` · for ${e.onBehalfOf}` : "";
   switch (e.type) {
@@ -275,6 +306,24 @@ function render(e) {
         }
       }
       break;
+    case "summary_requested": {
+      const p = e.payload;
+      const text = p.reason === "handoff"
+        ? `Writing a handoff note for ${p.for}…`
+        : `${p.for} asked to catch up${p.sinceSeq ? ` on everything after #${p.sinceSeq}` : ""}. Writing a note…`;
+      s.noteRequests.set(e.seq, { node: line("system", time, el("div", "meta", text)), reason: p.reason });
+      break;
+    }
+    case "summary_failed":
+      s.noteRequests.get(e.payload.requestSeq)?.node.remove();
+      s.noteRequests.delete(e.payload.requestSeq);
+      line("system", time, el("div", "meta", `Couldn't write the note for ${e.payload.for}: ${e.payload.error}`));
+      break;
+    case "summary_ready":
+      renderNote(e, time, s.noteRequests.get(e.payload.requestSeq)?.reason);
+      s.noteRequests.get(e.payload.requestSeq)?.node.remove();
+      s.noteRequests.delete(e.payload.requestSeq);
+      break;
     case "tool_finished": {
       const d = el("details", `tool${e.payload.isError ? " error" : ""}`);
       d.append(el("summary", null, e.payload.isError ? "tool failed" : "tool result"), el("pre", null, e.payload.output));
@@ -283,6 +332,72 @@ function render(e) {
     }
   }
   $("log").scrollTop = $("log").scrollHeight;
+}
+
+// A link to an event in the log. Notes cite their sources this way, so a
+// reader can check any claim against what actually happened.
+function cite(seq) {
+  const a = el("a", "cite", `#${seq}`);
+  a.href = "#";
+  a.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    const target = $("log").querySelector(`[data-seq="${seq}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    target.classList.remove("flash");
+    void target.offsetWidth;
+    target.classList.add("flash");
+  });
+  return a;
+}
+
+function withCitations(text) {
+  const box = el("div", "prose");
+  for (const part of text.split(/(\[#\d+\])/)) {
+    const m = part.match(/^\[#(\d+)\]$/);
+    box.append(m ? cite(Number(m[1])) : document.createTextNode(part));
+  }
+  return box;
+}
+
+function renderNote(e, time, reason) {
+  const { for: who, sinceSeq, upToSeq, facts: f, text } = e.payload;
+  const range = sinceSeq ? `#${sinceSeq + 1}–#${upToSeq}` : `up to #${upToSeq}`;
+  const body = el("div", "msg");
+  body.append(withCitations(text));
+
+  // The facts come from the log itself, not from the model.
+  const items = [];
+  const item = (label, rows) => rows.length && items.push([label, rows]);
+  item("Now", [[`${f.driver} is driving; the agent is ${f.agent}${f.pausedBy ? ` (paused by ${f.pausedBy})` : ""}`]]);
+  item("Waiting for approval", f.pendingApprovals.map((a) => [`${a.tool} for ${a.requestedFor}: it ${a.reason}`, a.seq]));
+  item("Suggestions waiting", f.pendingSuggestions.map((x) => [`${x.author}: “${x.text}”`, x.seq]));
+  item("Instructions", f.instructions.map((x) => [`${x.author}: “${x.text}”`, x.seq]));
+  item("Handoffs", f.handoffs.map((x) => [`${x.from} to ${x.to}`, x.seq]));
+  item("Commits", f.commits.map((x) => [`${x.sha ? `${x.sha} ` : ""}${x.message}, by ${x.by}`, x.seq]));
+  item("Pushes", f.pushes.map((x) => [`${x.branch}, by ${x.by}${x.approvedBy ? `, approved by ${x.approvedBy}` : ""}`, x.seq]));
+  item("Pull requests", f.pullRequests.map((x) => [`${x.title}, by ${x.by}${x.url ? ` (${x.url})` : ""}`, x.seq]));
+  item("Files changed", f.filesChanged.map((x) => [`${x.path}, last by ${x.by}`, x.seq]));
+  item("Failed", f.failures.map((x) => [`${x.tool}: ${x.error}`, x.seq]));
+  item("Denied", f.denials.map((x) => [`${x.tool}, by ${x.by}${x.reason ? `: ${x.reason}` : ""}`, x.seq]));
+  const details = el("details", "facts");
+  details.open = true;
+  details.append(el("summary", null, "From the log"));
+  const dl = el("dl");
+  for (const [label, rows] of items) {
+    dl.append(el("dt", null, label));
+    for (const [t, seq] of rows) {
+      const dd = el("dd", null, t);
+      if (seq) dd.append(" ", cite(seq));
+      dl.append(dd);
+    }
+  }
+  details.append(dl);
+  const since = el("div", "since");
+  body.append(details, since);
+  const label = reason === "asked" ? `Catch-up note for ${who}` : `Handoff note for ${who}`;
+  line("note", `${label} · covers ${range} · ${time}`, body);
+  s.notes.push({ upToSeq, since });
 }
 
 function describe(input) {
@@ -342,6 +457,20 @@ function refresh() {
     }
     setActions(a.seq, "waiting", acts);
   }
+  // A note covers the log up to where it started. Say how much has
+  // happened since, rather than let it pass for current.
+  for (const n of s.notes) {
+    const newer = s.workSeqs.filter((q) => q > n.upToSeq);
+    n.since.replaceChildren();
+    if (!newer.length) {
+      n.since.textContent = "Nothing has happened since this note.";
+      continue;
+    }
+    n.since.append(`${newer.length} event${newer.length === 1 ? "" : "s"} happened after this note, starting at `, cite(newer[0]), ".");
+  }
+  const missed = s.workSeqs.filter((q) => q > s.lastVisit).length;
+  $("catch-up").textContent = s.lastVisit && missed ? `Catch me up (${missed} new since your last visit)` : "Catch me up";
+
   const waiting = s.approvals.size > 0 && !s.paused;
   $("working").hidden = !waiting && !agentBusy();
   $("working").textContent = waiting ? "Agent is waiting for an approval…" : "Agent is working…";

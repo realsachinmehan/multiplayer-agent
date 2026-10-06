@@ -21,6 +21,7 @@ export type PendingApproval = ApprovalPolicy & { toolUseId: string; tool: string
 /** An instruction on the log that the agent hasn't read yet. */
 export type Queued = { seq: number; text: string; author: string; suggestedBy?: string };
 export type Suggestion = { seq: number; text: string; author: string };
+export type SummaryRequest = { seq: number; for: string; actor: string; reason: "handoff" | "asked"; sinceSeq: number };
 
 export type SessionState = {
   lastSeq: number;
@@ -38,6 +39,11 @@ export type SessionState = {
   approvals: PendingApproval[];
   roleOf(user: string): Role;
   roles: Record<string, Role>;
+  // Handoff notes asked for and not yet written (or failed).
+  summaryRequests: SummaryRequest[];
+  // The seq at which each person last gave up the wheel. A handoff note
+  // for someone returning covers what happened since then.
+  droveUntil: Record<string, number>;
 };
 
 /**
@@ -64,6 +70,8 @@ export function fold(events: SessionEvent[]): SessionState {
   const roles = new Map<string, Role>();
   const requested = new Map<string, PendingApproval>();
   const granted = new Map<string, string>();
+  const summaryRequests = new Map<number, SummaryRequest>();
+  const droveUntil: Record<string, number> = {};
 
   const flushUserTurn = (upToSeq: number) => {
     const seen = queued.filter((q) => q.seq <= upToSeq);
@@ -119,6 +127,14 @@ export function fold(events: SessionEvent[]): SessionState {
         break;
       case "driver_changed":
         driver = e.payload.to;
+        droveUntil[e.payload.from] = e.seq;
+        break;
+      case "summary_requested":
+        summaryRequests.set(e.seq, { seq: e.seq, actor: e.actor, ...e.payload });
+        break;
+      case "summary_ready":
+      case "summary_failed":
+        summaryRequests.delete(e.payload.requestSeq);
         break;
       case "paused":
         paused = true;
@@ -194,6 +210,8 @@ export function fold(events: SessionEvent[]): SessionState {
     approvals: [...requested.values()].filter((a) => !granted.has(a.toolUseId)),
     roleOf: (user) => roles.get(user) ?? DEFAULT_ROLE,
     roles: Object.fromEntries(roles),
+    summaryRequests: [...summaryRequests.values()],
+    droveUntil,
   };
 }
 

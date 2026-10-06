@@ -1,6 +1,3 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { approve, CommandError, deny, passDriver, pause, postMessage, setRole } from "../src/commands.js";
@@ -8,12 +5,11 @@ import { saveCredentials } from "../src/credentials.js";
 import type { Db } from "../src/db.js";
 import { readEvents } from "../src/events.js";
 import { gitTools } from "../src/git-tools.js";
-import type { GitHubApi, RepoRef } from "../src/github.js";
 import { startServer } from "../src/server.js";
 import { createSession } from "../src/sessions.js";
 import { fold } from "../src/state.js";
 import { driveSession, type WorkerDeps } from "../src/worker.js";
-import { deps, say, ScriptedModel, testDb, toolUse } from "./helpers.js";
+import { deps, FakeGitHub, remoteRepo, say, ScriptedModel, sh, testDb, toolUse } from "./helpers.js";
 
 const KEY = Buffer.alloc(32, 7);
 const TOKENS = { alice: "ghp_alice_secret_0001", bob: "ghp_bob_secret_0002", carol: "ghp_carol_secret_0003" };
@@ -29,33 +25,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await db.end();
 });
-
-/** Records every GitHub call with the token it was made with. */
-class FakeGitHub implements GitHubApi {
-  calls: Array<{ op: string; token: string; repo: RepoRef; body: string }> = [];
-  async createPullRequest(token: string, repo: RepoRef, pr: { title: string; body: string }) {
-    this.calls.push({ op: "pr", token, repo, body: pr.body });
-    return { number: 7, url: `https://github.com/${repo.owner}/${repo.name}/pull/7` };
-  }
-  async commentOnPullRequest(token: string, repo: RepoRef, _n: number, body: string) {
-    this.calls.push({ op: "comment", token, repo, body });
-    return { url: "https://github.com/x/y/pull/7#issuecomment-1" };
-  }
-}
-
-const sh = (cwd: string, ...args: string[]) =>
-  execFileSync("git", args, { cwd, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }).toString().trim();
-
-/** A bare repository with one commit on main, standing in for GitHub. */
-function remoteRepo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "mpagent-remote-"));
-  const seed = mkdtempSync(join(tmpdir(), "mpagent-seed-"));
-  sh(dir, "init", "-q", "--bare", "-b", "main");
-  sh(seed, "init", "-q", "-b", "main");
-  sh(seed, "-c", "user.name=seed", "-c", "user.email=seed@x", "commit", "-q", "--allow-empty", "-m", "initial");
-  sh(seed, "push", "-q", dir, "main");
-  return dir;
-}
 
 function gitDeps(model: ScriptedModel, github = new FakeGitHub()): WorkerDeps & { github: FakeGitHub } {
   return { ...deps(db, model, { extraTools: gitTools }), credentialsKey: KEY, github };

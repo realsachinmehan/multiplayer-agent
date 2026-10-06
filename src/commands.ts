@@ -23,6 +23,8 @@ import { fold, type SessionState } from "./state.js";
  *   whose role the call's policy names, and some need a second person.
  * - Roles come from the log too, so every check uses the role a person has
  *   at the moment they act, not when they joined.
+ * - Every handoff asks for a note for the new driver. Anyone can ask for one
+ *   to catch up; a worker writes it beside the agent (see handoff.ts).
  */
 export class CommandError extends Error {
   constructor(
@@ -109,6 +111,12 @@ function handOver(state: SessionState, user: string, to: string, reason: "passed
     ...state.queued
       .filter((q) => q.author === from)
       .map((q): AppendInput => ({ type: "withdrawn", actor: user, payload: { targetSeq: q.seq, reason: "driver_changed" } })),
+    // Every handoff comes with a note for the new driver, asked for in the
+    // same transaction so no handoff can be missed. It covers what happened
+    // since they last held the wheel, or the whole session if they never did.
+    ...(state.summaryRequests.some((r) => r.for === to)
+      ? []
+      : [{ type: "summary_requested", actor: user, payload: { for: to, reason: "handoff", sinceSeq: state.droveUntil[to] ?? 0 } } as const]),
   ];
 }
 
@@ -133,6 +141,25 @@ export async function claimDriver(db: Db, sessionId: string, user: string) {
     if (rowCount) throw new CommandError(409, `${state.driver} is still here; ask them to pass the wheel`);
     return handOver(state, user, user, "claimed");
   });
+}
+
+/**
+ * Asks for a note catching you up on what happened since sinceSeq. Viewers
+ * can ask too: reading is what they do. Asking again while your last note is
+ * still being written returns that request instead of starting another.
+ */
+export async function requestSummary(db: Db, sessionId: string, user: string, sinceSeq = 0) {
+  let existing: number | null = null;
+  const events = await command(db, sessionId, (state) => {
+    const pending = state.summaryRequests.find((r) => r.for === user);
+    if (pending) {
+      existing = pending.seq;
+      return [];
+    }
+    const since = Math.max(0, Math.min(Math.trunc(sinceSeq) || 0, state.lastSeq));
+    return [{ type: "summary_requested", actor: user, payload: { for: user, reason: "asked", sinceSeq: since } }];
+  });
+  return { requestSeq: existing ?? events[0].seq, existing: existing != null };
 }
 
 /** Anyone can stop the agent. It finishes a tool that is already running. */

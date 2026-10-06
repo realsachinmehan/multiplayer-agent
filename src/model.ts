@@ -27,7 +27,8 @@ export class ClaudeModel implements Model {
       model: this.model,
       max_tokens: 64000,
       system: req.system,
-      tools: req.tools,
+      // Handoff notes call the model with no tools at all.
+      ...(req.tools.length ? { tools: req.tools } : {}),
       messages: req.messages,
       output_config: { effort: "high" },
       // On a safety-classifier refusal the API retries on a fallback model
