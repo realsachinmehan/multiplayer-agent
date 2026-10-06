@@ -10,7 +10,7 @@ import type { WorkerDeps } from "../src/worker.js";
 export async function testDb(): Promise<Db> {
   const db = connect(process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/mpagent_test");
   await migrate(db);
-  await db.query("TRUNCATE events, session_leases, sessions");
+  await db.query("TRUNCATE presence, events, session_leases, sessions");
   return db;
 }
 

@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import { connect } from "./db.js";
+import { EVENTS_CHANNEL } from "./events.js";
 import { ClaudeModel } from "./model.js";
 import { sessionsNeedingWork } from "./sessions.js";
 import { fileTools, registry } from "./tools.js";
@@ -36,7 +37,7 @@ async function sweep() {
 }
 
 const listener = await db.connect();
-await listener.query("LISTEN session_events");
+await listener.query(`LISTEN ${EVENTS_CHANNEL}`);
 listener.on("notification", () => void sweep());
 setInterval(() => void sweep(), 5_000);
 await sweep();
