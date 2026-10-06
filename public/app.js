@@ -22,6 +22,7 @@ function resetState() {
     watchers: [],
     roles: new Map(), // user -> role; anyone unlisted is a member
     lastSeq: 0,
+    toolNames: new Map(), // toolUseId -> tool name
     workSeqs: [], // seqs of everything except handoff notes, to count what is newer than a note
     notes: [], // written notes: { upToSeq, since: element }
     noteRequests: new Map(), // requestSeq -> { node, reason }, until the note arrives
@@ -302,6 +303,7 @@ function render(e) {
       for (const b of e.payload.content) {
         if (b.type === "text" && b.text) line("agent", `agent${forWhom} · ${time}`, el("div", "msg", b.text));
         if (b.type === "tool_use") {
+          s.toolNames.set(b.id, b.name);
           line("agent", `agent${forWhom} · ${time}`, el("div", "tool", `→ ${b.name} ${describe(b.input)}`));
         }
       }
@@ -326,7 +328,12 @@ function render(e) {
       break;
     case "tool_finished": {
       const d = el("details", `tool${e.payload.isError ? " error" : ""}`);
-      d.append(el("summary", null, e.payload.isError ? "tool failed" : "tool result"), el("pre", null, e.payload.output));
+      // Side effects say whose name they went out under, so show that line.
+      const name = s.toolNames.get(e.payload.toolUseId) ?? "";
+      const first = e.payload.output.split("\n")[0].replace(/:$/, "").slice(0, 120);
+      const telling = e.payload.isError || /^(git_|open_pull_request|comment_on_pull_request|write_file)/.test(name);
+      const label = telling ? `${e.payload.isError ? "failed: " : "✓ "}${first}` : "tool result";
+      d.append(el("summary", null, label), el("pre", null, e.payload.output));
       line("agent", `${time}${forWhom}`, d);
       break;
     }

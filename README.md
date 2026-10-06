@@ -4,9 +4,15 @@ A coding agent session that several engineers can watch, steer and hand off, lik
 
 The angle: **the agent acts as whoever steered it.** Every action records the human whose instruction caused it, and acts on it: a commit the agent makes while Bob is steering is authored by Bob, with Bob's token, and a push to main waits for a maintainer who isn't Bob. Shipping products like Cursor's shared cloud agents run every follow-up on the session creator's credentials.
 
+![Alice and Bob steer one agent from two browsers: Bob's message becomes a suggestion Alice accepts, Alice hands the wheel to Bob with a handoff note, and Bob's push to main waits for Alice's approval. On the remote, each commit is authored by the person who asked for it.](docs/demo.gif)
+
+One minute, two browsers: Alice drives, Bob suggests, Alice hands over with a note, and Bob's push to main waits for Alice to approve it. The agent's turns are scripted so the demo plays the same way every time ([`demo/run.ts`](demo/run.ts)); the server, log, git, approvals and notes are the real system.
+
+**The hard part is concurrency.** [docs/conflicts.md](docs/conflicts.md) goes through thirteen conflict cases: what goes wrong if you do nothing, the rule this project picked, how the code makes it hold, and the test that proves it. One of them is a race the randomized test found.
+
 ## Status
 
-Steps 1 to 5 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it, whose name its actions carry, and a note for whoever takes over.
+All six steps are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it, whose name its actions carry, and a note for whoever takes over.
 
 | Step | What | State |
 |---|---|---|
@@ -15,7 +21,7 @@ Steps 1 to 5 of 6 are built: a durable agent loop on an append-only event log, s
 | 3 | Driver role, suggestions, pause, withdrawal, conflict tests | done |
 | 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | done |
 | 5 | Handoff summaries | done |
-| 6 | Two-window demo and conflict write-up | next |
+| 6 | Two-window demo and conflict write-up | done |
 
 ## How it works
 
@@ -36,7 +42,7 @@ Fan-out uses Postgres `LISTEN/NOTIFY`, with no Redis. Each append sends a notifi
 
 **Presence.** Each open stream holds a row in `presence` that it heartbeats. Watchers get a fresh snapshot (who, and how many tabs) whenever someone arrives or leaves. A server that dies without cleaning up leaves rows that expire, and the next sweep removes them and tells the session. Presence is kept out of the event log on purpose: it is live state, not session history.
 
-**Steering rules.** Several people talking to one agent at once is the core design problem. The rules are in `src/commands.ts`:
+**Steering rules.** Several people talking to one agent at once is the core design problem. The rules are in `src/commands.ts`, and [docs/conflicts.md](docs/conflicts.md) walks through each conflict case:
 
 - **One driver at a time.** The session's creator drives first. The driver's messages are instructions; everyone else's are suggestions that show up for all to see, and the agent only acts on one once the driver accepts it. An accepted suggestion reaches the model as `[bob, accepted by alice] ...` and runs with Alice's authority.
 - **Handoff.** The driver can pass the wheel to anyone, and anyone can take it once the driver has left the session. Instructions the old driver queued that the agent hasn't read yet are withdrawn, because they carried the old driver's authority. Pending suggestions carry over to the new driver.
@@ -103,6 +109,13 @@ A session can name a repository (`repoUrl` when you create one); the agent clone
 The CLI still works without the browser: `npm run cli new alice "title"`, `npm run cli say <session> bob "text"`, `npm run cli log <session>`.
 
 The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and `write_file` (paths confined to that directory), plus `git_status`, `git_create_branch`, `git_commit`, `git_push`, `open_pull_request` and `comment_on_pull_request`.
+
+**Recording the demo.** `demo/run.ts` seeds a repository (a local bare repo standing in for GitHub), connects demo accounts for Alice and Bob, and serves a session with the agent's turns scripted. `demo/record.mjs` drives two browser windows through it and writes `demo/out/demo.{webm,mp4,gif}`:
+
+```sh
+npm i --no-save playwright && npx playwright install chromium
+node demo/record.mjs        # needs ffmpeg for the mp4 and gif
+```
 
 ## Tests
 
