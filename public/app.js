@@ -458,9 +458,9 @@ function refresh() {
   for (const [id, a] of s.approvals) {
     const canApprove = RANK[myRole] >= RANK[a.minRole] && (a.allowSelf || me !== a.requestedFor);
     const acts = [];
-    if (canApprove) acts.push(["Approve", `approvals/${id}/approve`]);
+    if (canApprove) acts.push(["Approve", `approvals/${encodeURIComponent(id)}/approve`]);
     if (canApprove || me === a.requestedFor) {
-      acts.push(["Deny", `approvals/${id}/deny`, () => ({ reason: prompt("Why? The agent will see this.") ?? "" })]);
+      acts.push(["Deny", `approvals/${encodeURIComponent(id)}/deny`, () => ({ reason: prompt("Why? The agent will see this.") ?? "" })]);
     }
     setActions(a.seq, "waiting", acts);
   }

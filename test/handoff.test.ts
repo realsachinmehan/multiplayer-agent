@@ -191,6 +191,18 @@ describe("writing handoff notes", () => {
     expect(note.payload.droppedCitations).toEqual([999, 0]);
   });
 
+  it("keeps citations a model wrote as links or in groups, without the made-up URLs", async () => {
+    const sid = await createSession(db, { title: "t", createdBy: "alice" });
+    await postMessage(db, sid, "alice", "add a README");
+    await requestSummary(db, sid, "bob");
+    const text =
+      "Goal: a README [#[2](https://github.com/x/pulls)]. Done: nothing ([#2](https://example.com)). Watch out: [#9](https://example.com). See [#1, #2] and [#2-#3].";
+    await writeSummaries(noteDeps(new ScriptedModel([say(text)])), sid);
+    const [note] = await notes(sid);
+    expect(note.payload.text).toBe("Goal: a README [#2]. Done: nothing ([#2]). Watch out:. See [#1], [#2] and [#2]-[#3].");
+    expect(note.payload.droppedCitations).toEqual([9]);
+  });
+
   it("covers only what happened while a returning driver was away", async () => {
     const sid = await createSession(db, { title: "t", createdBy: "alice" });
     await postMessage(db, sid, "alice", "first thing");

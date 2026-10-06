@@ -9,7 +9,7 @@ import { ensureRepo } from "./git-tools.js";
 import { RestGitHub, type GitHubApi } from "./github.js";
 import type { Model } from "./model.js";
 import { fold, type SessionState } from "./state.js";
-import type { ToolContext, ToolRegistry } from "./tools.js";
+import { checkInput, type ToolContext, type ToolRegistry } from "./tools.js";
 
 export type WorkerDeps = {
   db: Db;
@@ -134,6 +134,8 @@ async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, inf
     });
 
   if (!tool) return void (await finish(`unknown tool: ${toolUse.name}`, true));
+  const invalid = checkInput(tool.definition, toolUse.input);
+  if (invalid) return void (await finish(invalid, true));
 
   if (resumed && (!tool.idempotent || state.paused)) {
     // The previous worker started this call and never recorded the result.

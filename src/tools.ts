@@ -42,6 +42,37 @@ export function confine(workspace: string, path: string): string {
   return full;
 }
 
+const TYPES: Record<string, (v: unknown) => boolean> = {
+  string: (v) => typeof v === "string",
+  integer: (v) => Number.isInteger(v),
+  number: (v) => typeof v === "number",
+  boolean: (v) => typeof v === "boolean",
+};
+
+/**
+ * Checks a call's arguments against the tool's schema before anything runs.
+ * Claude enforces strict schemas itself; other providers can send a call
+ * with arguments missing (one pushed to a branch named "undefined"), so the
+ * loop can't rely on that. Returns what is wrong, for the model to fix.
+ */
+export function checkInput(definition: Anthropic.Beta.BetaTool, input: unknown): string | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return `${definition.name} takes an object of arguments`;
+  const args = input as Record<string, unknown>;
+  const schema = definition.input_schema;
+  const props = (schema.properties ?? {}) as Record<string, { type?: string }>;
+  const missing = (schema.required ?? []).filter((k) => args[k] === undefined);
+  if (missing.length) return `${definition.name} is missing required arguments: ${missing.join(", ")}`;
+  for (const [k, v] of Object.entries(args)) {
+    const type = props[k]?.type;
+    if (!props[k]) {
+      if (schema.additionalProperties === false) return `${definition.name} has no argument named ${k}`;
+    } else if (type && TYPES[type] && !TYPES[type](v)) {
+      return `${definition.name}: ${k} must be a ${type}`;
+    }
+  }
+  return null;
+}
+
 const pathProp = { type: "string", description: "Path relative to the repository root." } as const;
 
 export const fileTools: Tool[] = [

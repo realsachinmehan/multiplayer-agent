@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { OpenAICompatModel } from "./openai-model.js";
 
 export type ModelRequest = {
   system: string;
@@ -39,4 +40,18 @@ export class ClaudeModel implements Model {
     const msg = await stream.finalMessage();
     return { content: msg.content, stopReason: msg.stop_reason };
   }
+}
+
+/**
+ * Picks the model from the environment. MODEL_PROVIDER=openai talks to any
+ * OpenAI-compatible endpoint (OPENAI_BASE_URL, OPENAI_API_KEY, MODEL);
+ * otherwise Claude through the Anthropic API (ANTHROPIC_API_KEY).
+ */
+export function modelFromEnv(env = process.env): Model {
+  if (env.MODEL_PROVIDER === "openai") {
+    const missing = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "MODEL"].filter((k) => !env[k]);
+    if (missing.length) throw new Error(`MODEL_PROVIDER=openai needs ${missing.join(", ")}`);
+    return new OpenAICompatModel({ baseUrl: env.OPENAI_BASE_URL!, apiKey: env.OPENAI_API_KEY!, model: env.MODEL! });
+  }
+  return new ClaudeModel(undefined, env.MODEL || undefined);
 }
