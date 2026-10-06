@@ -102,6 +102,19 @@ open "http://localhost:3000/?as=alice"   # start a session here
 open "http://localhost:3000/?as=bob"     # pick the same session here
 ```
 
+Or with any model behind an OpenAI-compatible endpoint that supports tool calling:
+
+```sh
+export MODEL_PROVIDER=openai
+export OPENAI_BASE_URL=https://your-endpoint/v1 OPENAI_API_KEY=... MODEL=moonshotai.kimi-k2.5
+npm run worker &
+npm run server &
+open "http://localhost:3000/?as=alice"   # start a session here
+open "http://localhost:3000/?as=bob"     # pick the same session here
+```
+
+The log stores every model turn in Anthropic's message shape whichever provider wrote it; `src/openai-model.ts` translates at the edge. Claude enforces tool schemas itself and other models don't always, so the loop checks each call's arguments against the tool's schema before running it.
+
 There is no login yet: `?as=<name>` says who you are, and that name is the identity everything else hangs off. Each person clicks **Connect GitHub** once and pastes a personal access token; after that the agent acts as whoever is steering. Without `CREDENTIALS_KEY` the server refuses to store tokens, and the git and GitHub tools refuse to act.
 
 A session can name a repository (`repoUrl` when you create one); the agent clones it as the person steering, or works in a fresh local repository if you leave it blank.
@@ -116,6 +129,8 @@ The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and
 npm i --no-save playwright && npx playwright install chromium
 node demo/record.mjs        # needs ffmpeg for the mp4 and gif
 ```
+
+With `MODEL_PROVIDER` set as above, a real model takes the agent's turns and writes the handoff note instead of the script, and each beat waits for the agent to finish rather than for a scripted line.
 
 ## Tests
 

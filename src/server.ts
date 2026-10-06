@@ -174,9 +174,16 @@ export async function startServer(db: Db, opts: ServerOpts = {}): Promise<Runnin
         return done(await commands.passDriver(db, sessionId, user, to));
       }
       if (what === "driver/claim") return done(await commands.claimDriver(db, sessionId, user));
-      const approval = what.match(/^approvals\/([A-Za-z0-9_-]{1,100})\/(approve|deny)$/);
+      // Tool call ids come from the model provider; some use "." or ":".
+      const approval = what.match(/^approvals\/([^/]{1,300})\/(approve|deny)$/);
       if (approval) {
-        const [, toolUseId, decision] = approval;
+        const [, encodedId, decision] = approval;
+        let toolUseId: string;
+        try {
+          toolUseId = decodeURIComponent(encodedId);
+        } catch {
+          throw new HttpError(400, "malformed approval id");
+        }
         if (decision === "approve") return done(await commands.approve(db, sessionId, user, toolUseId));
         const { reason } = await body(req);
         return done(await commands.deny(db, sessionId, user, toolUseId, typeof reason === "string" ? reason.slice(0, 500) : undefined));

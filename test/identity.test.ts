@@ -10,6 +10,7 @@ import { createSession } from "../src/sessions.js";
 import { fold } from "../src/state.js";
 import { driveSession, type WorkerDeps } from "../src/worker.js";
 import { deps, FakeGitHub, remoteRepo, say, ScriptedModel, sh, testDb, toolUse } from "./helpers.js";
+import type { ModelResponse } from "../src/model.js";
 
 const KEY = Buffer.alloc(32, 7);
 const TOKENS = { alice: "ghp_alice_secret_0001", bob: "ghp_bob_secret_0002", carol: "ghp_carol_secret_0003" };
@@ -130,7 +131,10 @@ describe("acting as the person who steered", () => {
 });
 
 describe("approval gates", () => {
-  async function pushToMainSession() {
+  const withId = (res: ModelResponse, id?: string): ModelResponse =>
+    id ? { ...res, content: res.content.map((b) => (b.type === "tool_use" ? { ...b, id } : b)) } : res;
+
+  async function pushToMainSession(pushId?: string) {
     const remote = remoteRepo();
     const sid = await createSession(db, { title: "t", createdBy: "alice", repoUrl: remote });
     await setRole(db, sid, "alice", "carol", "maintainer");
@@ -138,7 +142,7 @@ describe("approval gates", () => {
     const model = new ScriptedModel([
       toolUse("write_file", { path: "fix.txt", contents: "fixed" }),
       toolUse("git_commit", { message: "Fix" }),
-      toolUse("git_push", { branch: "main" }),
+      withId(toolUse("git_push", { branch: "main" }), pushId),
       say("pushed to main"),
     ]);
     const d = gitDeps(model);
@@ -206,12 +210,13 @@ describe("approval gates", () => {
   });
 
   it("enforces the same rules over HTTP", async () => {
-    const { sid } = await pushToMainSession();
+    // Other providers' call ids can hold characters Anthropic's never do.
+    const { sid } = await pushToMainSession("functions.git_push:2");
     const toolUseId = fold(await log(sid)).approvals[0].toolUseId;
     const server = await startServer(db, { credentialsKey: KEY });
     try {
       const decide = (user: string, what: string, body = {}) =>
-        fetch(`${server.url}/sessions/${sid}/approvals/${toolUseId}/${what}?as=${user}`, { method: "POST", body: JSON.stringify(body) });
+        fetch(`${server.url}/sessions/${sid}/approvals/${encodeURIComponent(toolUseId)}/${what}?as=${user}`, { method: "POST", body: JSON.stringify(body) });
       expect((await decide("bob", "approve")).status).toBe(403);
       expect((await decide("alice", "approve")).status).toBe(403);
       expect((await decide("bob", "deny", { reason: "not yours" })).status).toBe(403);

@@ -4,6 +4,9 @@
  *
  *   DATABASE_URL=... npx tsx demo/run.ts
  *
+ * Set MODEL_PROVIDER (and the variables model.ts's modelFromEnv reads) to
+ * have a real model take the agent's turns and write the handoff note.
+ *
  * Seeds a repository (a local bare repo standing in for GitHub), connects
  * fake GitHub accounts for Alice and Bob, creates a session that Alice
  * drives, then serves it. demo/record.mjs drives two browser windows
@@ -20,7 +23,7 @@ import { connect, migrate } from "../src/db.js";
 import { EVENTS_CHANNEL } from "../src/events.js";
 import { gitTools } from "../src/git-tools.js";
 import { sessionsNeedingSummaries, writeSummaries } from "../src/handoff.js";
-import type { Model, ModelRequest, ModelResponse } from "../src/model.js";
+import { modelFromEnv, type Model, type ModelRequest, type ModelResponse } from "../src/model.js";
 import { startServer } from "../src/server.js";
 import { createSession, sessionsNeedingWork } from "../src/sessions.js";
 import { fileTools, registry } from "../src/tools.js";
@@ -165,16 +168,17 @@ for (const [userId, gitName] of [["alice", "Alice Ng"], ["bob", "Bob Ortiz"]]) {
 const remote = seedRepo();
 const sessionId = await createSession(db, { title: "Fix the flaky payout test", createdBy: "alice", repoUrl: remote });
 
+const live = process.env.MODEL_PROVIDER ? modelFromEnv() : null;
 const server = await startServer(db, { port: Number(process.env.PORT ?? 3000), credentialsKey: key });
 const deps: WorkerDeps = {
   db,
-  model: new DemoAgent(),
+  model: live ?? new DemoAgent(),
   tools: registry([...fileTools, ...gitTools]),
   credentialsKey: key,
   workerId: "demo-worker",
   workspaceRoot: mkdtempSync(join(tmpdir(), "demo-workspaces-")),
 };
-const notes = { db, model: new DemoNotes(), workerId: "demo-worker" };
+const notes = { db, model: live ?? new DemoNotes(), workerId: "demo-worker" };
 
 const busy = new Set<string>();
 const once = (k: string, f: () => Promise<unknown>) => {

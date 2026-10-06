@@ -6,6 +6,10 @@
 //
 // Writes demo.webm, demo.mp4 and demo.gif to out-dir (default demo/out).
 // The mp4 and gif need ffmpeg on the PATH.
+//
+// With MODEL_PROVIDER set (see modelFromEnv in src/model.ts), a real model
+// takes the agent's turns. Its words differ run to run, so each beat waits
+// for the agent to go quiet instead of for a scripted line.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -15,6 +19,8 @@ import { chromium } from "playwright";
 const out = resolve(process.argv[2] ?? "demo/out");
 mkdirSync(out, { recursive: true });
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const live = Boolean(process.env.MODEL_PROVIDER);
+const wait = live ? 300_000 : 30_000;
 
 // Start the demo server and wait for it to say where it is.
 const run = spawn(process.execPath, ["--import", "tsx", "demo/run.ts"], { stdio: ["ignore", "pipe", "inherit"], env: process.env });
@@ -60,7 +66,15 @@ const say = async (who, text) => {
   await pause(400);
   await who.locator("#text").press("Enter");
 };
-const sees = (who, text) => who.getByText(text).first().waitFor({ timeout: 30_000 });
+const sees = (who, text) => who.getByText(text).first().waitFor({ timeout: wait });
+// A scripted run waits for the agent's scripted line; a live one waits for
+// the agent to start, then to stop working.
+async function agentDone(who, scripted) {
+  if (!live) return sees(who, scripted);
+  const working = who.locator("#working");
+  await working.waitFor({ state: "visible", timeout: 30_000 }).catch(() => {});
+  await working.waitFor({ state: "hidden", timeout: wait });
+}
 function showRemote(title) {
   const log = execFileSync("git", ["log", "main", "--format=%h  author: %<(10)%an  committer: %<(18)%cn  %s"], {
     cwd: remote,
@@ -70,14 +84,17 @@ function showRemote(title) {
 }
 
 await showRemote("origin/main");
-await caption("Alice and Bob share one coding agent on a repository. Alice started the session, so she is driving.");
+await caption(
+  "Alice and Bob share one coding agent on a repository. Alice started the session, so she is driving." +
+    (live ? ` The agent is ${process.env.MODEL}, live: nothing it says is scripted.` : ""),
+);
 await alice.locator(".who").nth(1).waitFor();
 await bob.locator(".who").nth(1).waitFor();
 await pause(3500);
 
 await caption("Alice gives the agent a task. Bob watches every step live.");
 await say(alice, "payout.test.ts fails about one run in ten. Find out why and fix it.");
-await sees(alice, "Fixed the test");
+await agentDone(alice, "Fixed the test");
 await pause(2500);
 
 await caption("Bob isn't driving, so his message is a suggestion. The agent doesn't see it unless Alice accepts.");
@@ -86,13 +103,13 @@ await alice.getByRole("button", { name: "Accept" }).waitFor();
 await pause(3500);
 await caption("Alice accepts. The agent reads it as Bob's idea, accepted by Alice, and commits as Alice.");
 await alice.getByRole("button", { name: "Accept" }).click();
-await sees(alice, "Committed the test and the query together.");
+await agentDone(alice, "Committed the test and the query together.");
 await pause(3000);
 
 await caption("Alice has to leave, so she passes the wheel to Bob. Bob gets a handoff note: a summary that cites the log, and facts read straight from it.");
 await alice.getByRole("button", { name: "Pass the wheel" }).click();
 const note = bob.locator(".ev.note");
-await note.waitFor({ timeout: 30_000 });
+await note.waitFor({ timeout: wait });
 await note.scrollIntoViewIfNeeded();
 await pause(7000);
 
@@ -102,7 +119,7 @@ await sees(bob, "needs approval");
 await caption("A push to main needs a maintainer other than the person asking. Bob can only deny it. Alice can approve it.");
 await pause(5000);
 await alice.getByRole("button", { name: "Approve" }).click();
-await sees(bob, "Pushed both commits to main.");
+await agentDone(bob, "Pushed both commits to main.");
 await pause(1500);
 
 await caption("On the remote, each commit is authored by the person who asked for it, with the agent as committer.");

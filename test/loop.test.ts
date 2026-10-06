@@ -214,6 +214,28 @@ describe("event log", () => {
     ]);
   });
 
+  it("refuses a call with missing or wrongly typed arguments before it starts", async () => {
+    const sid = await createSession(db, { title: "t", createdBy: "alice" });
+    await postMessage(db, sid, "alice", "write hello.txt");
+    const model = new ScriptedModel([
+      toolUse("write_file", { path: "hello.txt" }),
+      toolUse("write_file", { path: "hello.txt", contents: 5 }),
+      toolUse("write_file", { path: "hello.txt", contents: "hi", mode: "0600" }),
+      say("giving up"),
+    ]);
+    const d = deps(db, model);
+    await driveSession(d, sid);
+
+    const events = await readEvents(db, sid);
+    expect(types(events)).not.toContain("tool_started");
+    expect(events.filter((e) => e.type === "tool_finished").map((e) => e.payload)).toMatchObject([
+      { isError: true, output: "write_file is missing required arguments: contents" },
+      { isError: true, output: "write_file: contents must be a string" },
+      { isError: true, output: "write_file has no argument named mode" },
+    ]);
+    expect(existsSync(join(d.workspaceRoot, sid, "hello.txt"))).toBe(false);
+  });
+
   it("refuses paths outside the session workspace", async () => {
     const sid = await createSession(db, { title: "t", createdBy: "alice" });
     await postMessage(db, sid, "alice", "read secrets");
