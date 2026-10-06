@@ -1,0 +1,26 @@
+{
+  "name": "multiplayer-agent",
+  "version": "1.0.0",
+  "description": "A coding agent session that several people can watch, steer and hand off.",
+  "scripts": {
+    "migrate": "tsx src/migrate.ts",
+    "worker": "tsx src/worker-main.ts",
+    "cli": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "private": true,
+  "type": "module"
+}
