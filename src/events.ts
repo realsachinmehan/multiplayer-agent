@@ -31,6 +31,7 @@ export type SessionEvent = EventBody & {
 };
 
 export const AGENT = "agent";
+export const EVENTS_CHANNEL = "session_events";
 
 /** Thrown when an agent append carries a stale fencing epoch. */
 export class LeaseLostError extends Error {
@@ -73,7 +74,9 @@ export async function append(db: Db, sessionId: string, inputs: AppendInput[], f
       );
       out.push({ ...e, sessionId, seq, onBehalfOf, createdAt: res.rows[0].created_at } as SessionEvent);
     }
-    await c.query("SELECT pg_notify('session_events', $1)", [sessionId]);
+    // Delivered on commit. It carries no data: listeners re-read the log, so
+    // a lost notification costs latency, never correctness.
+    await c.query("SELECT pg_notify($1, $2)", [EVENTS_CHANNEL, sessionId]);
     return out;
   });
 }
@@ -88,11 +91,11 @@ async function checkFence(c: pg.PoolClient, sessionId: string, fence: Fence): Pr
   }
 }
 
-export async function readEvents(db: Db, sessionId: string, afterSeq = 0): Promise<SessionEvent[]> {
+export async function readEvents(db: Db, sessionId: string, afterSeq = 0, limit?: number): Promise<SessionEvent[]> {
   const { rows } = await db.query(
     `SELECT session_id, seq, type, actor, on_behalf_of, payload, created_at
-     FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq`,
-    [sessionId, afterSeq],
+     FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`,
+    [sessionId, afterSeq, limit ?? null],
   );
   return rows.map((r) => ({
     sessionId: r.session_id,

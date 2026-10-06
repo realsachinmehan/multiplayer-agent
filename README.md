@@ -6,13 +6,13 @@ The angle: **the agent acts as whoever steered it.** Every action records the hu
 
 ## Status
 
-Step 1 of 6 is built: a durable agent loop on an append-only event log, for one user at a time.
+Steps 1 and 2 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching.
 
 | Step | What | State |
 |---|---|---|
 | 1 | Durable agent loop + append-only Postgres event log | done |
-| 2 | Live fan-out to clients (SSE/WebSocket), presence, late-join replay | next |
-| 3 | Driver role, instruction queue, interrupt, two-user conflict tests | |
+| 2 | Live fan-out to clients (SSE), presence, late-join replay | done |
+| 3 | Driver role, instruction queue, interrupt, two-user conflict tests | next |
 | 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | |
 | 5 | Handoff summaries | |
 | 6 | Two-window demo and conflict write-up | |
@@ -30,6 +30,12 @@ Step 1 of 6 is built: a durable agent loop on an append-only event log, for one 
 
 **Messages never interrupt a step; they queue.** Humans append `user_message` events at any time. Each `model_response` records `basedOnSeq`, the highest seq it saw. A message that landed while the model was mid-call is placed after that response in the conversation, because that's when the model actually reads it, and it triggers the next step. Each message reaches the model as `[author] text` so it knows who said what.
 
+**Live to every watcher.** Clients follow a session over server-sent events. Every session event is sent with `id: <seq>`, and each connection keeps its own cursor and only ever sends the events after it, in order. So a late joiner (`after=0`) replays the whole log and then continues live, and a browser that drops its connection resumes from `Last-Event-ID` with no gaps and no repeats.
+
+Fan-out uses Postgres `LISTEN/NOTIFY`, with no Redis. Each append sends a notification carrying only the session id, and every server process listening wakes its subscribers, which re-read the log from their cursor. The notification is just a doorbell and the log is the source of truth, so a lost notification costs latency, never correctness. Any number of server processes can serve the same session.
+
+**Presence.** Each open stream holds a row in `presence` that it heartbeats. Watchers get a fresh snapshot (who, and how many tabs) whenever someone arrives or leaves. A server that dies without cleaning up leaves rows that expire, and the next sweep removes them and tells the session. Presence is kept out of the event log on purpose: it is live state, not session history.
+
 **Attribution.** Every event has `actor` (who wrote it: a user id or `agent`) and `on_behalf_of` (the human whose instruction the agent was serving). Tool code receives `onBehalfOf`, which is where per-user credentials plug in later.
 
 ## Run it
@@ -45,17 +51,22 @@ npm test
 
 # Try it with Claude (needs ANTHROPIC_API_KEY):
 npm run worker &
-SID=$(npm run -s cli new alice "first session")
-npm run -s cli say $SID alice "create a hello world script in hello.py"
-npm run -s cli say $SID bob "make it print the date too"
-npm run -s cli log $SID
+npm run server &
+open "http://localhost:3000/?as=alice"   # start a session here
+open "http://localhost:3000/?as=bob"     # pick the same session here
 ```
+
+There is no login yet: `?as=<name>` says who you are. Real identity arrives with step 4.
+
+The CLI still works without the browser: `npm run cli new alice "title"`, `npm run cli say <session> bob "text"`, `npm run cli log <session>`.
 
 The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and `write_file`, and paths are confined to that directory.
 
 ## Tests
 
-`test/loop.test.ts` runs against a real Postgres and a scripted model:
+Everything runs against a real Postgres, with a scripted model in place of Claude.
+
+`test/loop.test.ts`, the agent loop:
 
 - a tool loop runs to completion, and every agent event is attributed to the steerer
 - a message sent while the model is thinking is queued for the next step, not lost or shown as seen
@@ -65,3 +76,12 @@ The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and
 - replaying the log rebuilds exactly the conversation the model saw
 - a tool call from a turn cut off at max_tokens is never run
 - tool paths can't escape the workspace
+
+`test/stream.test.ts`, streaming and presence over real HTTP:
+
+- a late joiner gets the whole log and then live events, with no gaps or repeats
+- a reconnecting client resumes after `Last-Event-ID`
+- three watchers see the identical order while 30 messages from three people land at once
+- a watcher on a second server process sees messages posted through the first
+- a live agent run streams step by step, each step attributed
+- presence updates when people arrive and leave, counts tabs, and drops watchers whose server died

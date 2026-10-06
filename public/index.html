@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multiplayer Agent</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <strong>Multiplayer Agent</strong>
+    <label>You are <input id="me" size="10" placeholder="name" autocomplete="off"></label>
+    <select id="sessions"><option value="">Pick a session…</option></select>
+    <button id="new">New session</button>
+    <div id="watchers" aria-label="Watching now"></div>
+  </header>
+  <main id="log" aria-live="polite"><p class="empty">Pick or start a session.</p></main>
+  <footer>
+    <div id="working" hidden>Agent is working…</div>
+    <form id="composer">
+      <input id="text" placeholder="Tell the agent what to do" autocomplete="off" disabled>
+      <button disabled>Send</button>
+    </form>
+  </footer>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

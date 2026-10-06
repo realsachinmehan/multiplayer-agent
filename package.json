@@ -4,6 +4,7 @@
   "description": "A coding agent session that several people can watch, steer and hand off.",
   "scripts": {
     "migrate": "tsx src/migrate.ts",
+    "server": "tsx src/server-main.ts",
     "worker": "tsx src/worker-main.ts",
     "cli": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
