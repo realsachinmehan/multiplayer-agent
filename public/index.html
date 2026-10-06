@@ -12,10 +12,12 @@
     <label>You are <input id="me" size="10" placeholder="name" autocomplete="off"></label>
     <select id="sessions"><option value="">Pick a session…</option></select>
     <button id="new">New session</button>
+    <button id="github" type="button" hidden>Connect GitHub</button>
     <div id="watchers" aria-label="Watching now"></div>
   </header>
   <nav id="controls" hidden>
     <span id="driver"></span>
+    <span id="my-role" class="tag"></span>
     <button id="claim" type="button" hidden>Take the wheel</button>
     <span id="pass" hidden>
       <select id="pass-to"></select>
@@ -24,6 +26,15 @@
     <span id="paused-by"></span>
     <button id="pause" type="button">Pause agent</button>
     <button id="resume" type="button" hidden>Resume</button>
+    <span id="roles" hidden>
+      <select id="role-user" aria-label="Person"></select>
+      <select id="role-value" aria-label="Role">
+        <option value="viewer">viewer</option>
+        <option value="member">member</option>
+        <option value="maintainer">maintainer</option>
+      </select>
+      <button id="role-btn" type="button">Set role</button>
+    </span>
     <span id="error" role="alert"></span>
   </nav>
   <main id="log" aria-live="polite"><p class="empty">Pick or start a session.</p></main>
@@ -34,6 +45,24 @@
       <button disabled>Send</button>
     </form>
   </footer>
+  <dialog id="new-dialog">
+    <form method="dialog" id="new-form">
+      <h3>New session</h3>
+      <label>What is it about? <input id="new-title" required></label>
+      <label>GitHub repository <input id="new-repo" placeholder="https://github.com/owner/repo (blank for a scratch repo)"></label>
+      <menu><button value="cancel" formnovalidate>Cancel</button><button value="ok">Start</button></menu>
+    </form>
+  </dialog>
+  <dialog id="github-dialog">
+    <form method="dialog" id="github-form">
+      <h3>Connect your GitHub account</h3>
+      <p>When you are the one steering, the agent commits, pushes and comments as you, with your token. Nobody else's instructions ever use it. It is encrypted on the server and never shown again.</p>
+      <label>Token <input id="gh-token" type="password" required autocomplete="off"></label>
+      <label>Name on your commits <input id="gh-name" required></label>
+      <label>Email on your commits <input id="gh-email" type="email" required></label>
+      <menu><button value="cancel" formnovalidate>Cancel</button><button value="ok">Connect</button></menu>
+    </form>
+  </dialog>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

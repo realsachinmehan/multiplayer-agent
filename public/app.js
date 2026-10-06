@@ -20,8 +20,12 @@ function resetState() {
     suggestions: new Map(), // pending suggestions: seq -> author
     nodes: new Map(), // seq -> rendered element, for later status changes
     watchers: [],
+    roles: new Map(), // user -> role; anyone unlisted is a member
+    approvals: new Map(), // toolUseId -> pending approval request, plus its seq
   };
 }
+const roleOf = (u) => s.roles.get(u) ?? "member";
+const RANK = { viewer: 0, member: 1, maintainer: 2 };
 resetState();
 
 $("me").value = me;
@@ -67,14 +71,50 @@ window.addEventListener("hashchange", () => {
   open();
 });
 
-$("new").addEventListener("click", async () => {
+$("new").addEventListener("click", () => {
   if (!me) return alert("Enter your name first.");
-  const title = prompt("What is this session about?");
-  if (!title) return;
-  const { id } = await api("/sessions", { method: "POST", body: JSON.stringify({ title }) });
-  sessionId = id;
-  await loadSessions();
-  location.hash = id;
+  $("new-form").reset();
+  $("new-dialog").showModal();
+});
+$("new-dialog").addEventListener("close", async () => {
+  if ($("new-dialog").returnValue !== "ok") return;
+  const title = $("new-title").value.trim();
+  const repoUrl = $("new-repo").value.trim() || undefined;
+  try {
+    const { id } = await api("/sessions", { method: "POST", body: JSON.stringify({ title, repoUrl }) });
+    sessionId = id;
+    await loadSessions();
+    location.hash = id;
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+// Your own GitHub account, which the agent uses only for what you steer.
+async function loadMe() {
+  $("github").hidden = !me;
+  if (!me) return;
+  const { githubConnected } = await api("/me");
+  $("github").textContent = githubConnected ? "GitHub connected ✓" : "Connect GitHub";
+}
+$("github").addEventListener("click", () => {
+  $("github-form").reset();
+  $("gh-name").value = me;
+  $("github-dialog").showModal();
+});
+$("github-dialog").addEventListener("close", async () => {
+  if ($("github-dialog").returnValue !== "ok") return;
+  const token = $("gh-token").value;
+  $("gh-token").value = "";
+  try {
+    await api("/me/github", {
+      method: "PUT",
+      body: JSON.stringify({ token, name: $("gh-name").value, email: $("gh-email").value }),
+    });
+  } catch (err) {
+    alert(err.message);
+  }
+  await loadMe();
 });
 
 $("composer").addEventListener("submit", async (e) => {
@@ -88,8 +128,10 @@ $("claim").addEventListener("click", () => act("driver/claim"));
 $("pass-btn").addEventListener("click", () => act("driver", { to: $("pass-to").value }));
 $("pause").addEventListener("click", () => act("pause"));
 $("resume").addEventListener("click", () => act("resume"));
+$("role-btn").addEventListener("click", () => act("roles", { user: $("role-user").value, role: $("role-value").value }));
 
 function open() {
+  void loadMe().catch(() => {});
   source?.close();
   resetState();
   $("log").replaceChildren();
@@ -146,6 +188,7 @@ function render(e) {
   switch (e.type) {
     case "session_created":
       s.driver = e.actor;
+      s.roles.set(e.actor, "maintainer");
       line("system", time, el("div", "meta", `${e.actor} started “${e.payload.title}” and is driving`));
       break;
     case "user_message": {
@@ -182,7 +225,36 @@ function render(e) {
     case "paused":
       s.paused = e.actor;
       line("system", time, el("div", "meta", `${e.actor} paused the agent`));
+      // Pausing cancels anything the agent planned but hadn't started,
+      // including calls still waiting for approval.
+      for (const a of s.approvals.values()) mark(a.seq, "withdrawn", "cancelled by the pause");
+      s.approvals.clear();
       break;
+    case "role_changed":
+      s.roles.set(e.payload.user, e.payload.role);
+      line("system", time, el("div", "meta", `${e.actor} made ${e.payload.user} a ${e.payload.role}`));
+      break;
+    case "approval_requested": {
+      const a = e.payload;
+      const who = a.allowSelf ? `a ${a.minRole}` : `a ${a.minRole} other than ${a.requestedFor}`;
+      const text = `The agent wants to run ${a.tool} ${describe(a.input)} for ${a.requestedFor}. ` +
+        `This ${a.reason}, so it needs ${who} to approve.`;
+      line("approval", `needs approval · ${time}`, el("div", "msg", text), e.seq);
+      s.approvals.set(a.toolUseId, { ...a, seq: e.seq });
+      break;
+    }
+    case "approval_granted": {
+      const a = s.approvals.get(e.payload.toolUseId);
+      if (a) mark(a.seq, null, `approved by ${e.actor}`);
+      s.approvals.delete(e.payload.toolUseId);
+      break;
+    }
+    case "approval_denied": {
+      const a = s.approvals.get(e.payload.toolUseId);
+      if (a) mark(a.seq, "withdrawn", `denied by ${e.actor}${e.payload.reason ? `: ${e.payload.reason}` : ""}`);
+      s.approvals.delete(e.payload.toolUseId);
+      break;
+    }
     case "resumed":
       s.paused = null;
       line("system", time, el("div", "meta", `${e.actor} resumed the agent`));
@@ -199,8 +271,7 @@ function render(e) {
       for (const b of e.payload.content) {
         if (b.type === "text" && b.text) line("agent", `agent${forWhom} · ${time}`, el("div", "msg", b.text));
         if (b.type === "tool_use") {
-          const arg = b.input?.path ?? JSON.stringify(b.input).slice(0, 80);
-          line("agent", `agent${forWhom} · ${time}`, el("div", "tool", `→ ${b.name} ${arg}`));
+          line("agent", `agent${forWhom} · ${time}`, el("div", "tool", `→ ${b.name} ${describe(b.input)}`));
         }
       }
       break;
@@ -214,15 +285,36 @@ function render(e) {
   $("log").scrollTop = $("log").scrollHeight;
 }
 
-// Buttons depend on who is driving now, so they are redrawn on every change.
+function describe(input) {
+  return input?.path ?? input?.branch ?? input?.name ?? input?.title ?? JSON.stringify(input ?? {}).slice(0, 80);
+}
+
+// Buttons depend on who is driving now and on roles, so they are redrawn on every change.
 function refresh() {
   const driving = s.driver === me;
   const driverHere = s.watchers.some((w) => w.userId === s.driver);
+  const myRole = roleOf(me);
+  const canSteer = myRole !== "viewer";
   $("watchers").replaceChildren(
-    ...s.watchers.map((w) => el("span", `who${w.userId === me ? " me" : ""}${w.userId === s.driver ? " driver" : ""}`, w.userId)),
+    ...s.watchers.map((w) => {
+      const role = roleOf(w.userId);
+      const cls = `who ${role}${w.userId === me ? " me" : ""}${w.userId === s.driver ? " driver" : ""}`;
+      const pill = el("span", cls, w.userId);
+      if (role !== "member") pill.append(el("span", "role", ` · ${role}`));
+      return pill;
+    }),
   );
   $("driver").textContent = driving ? "You are driving" : `${s.driver} is driving`;
-  $("claim").hidden = driving || driverHere;
+  $("my-role").textContent = `you: ${myRole}`;
+  $("claim").hidden = driving || driverHere || !canSteer;
+  $("pause").disabled = !canSteer;
+  $("text").disabled = $("composer").querySelector("button").disabled = !canSteer;
+  $("roles").hidden = myRole !== "maintainer";
+  const people = [...new Set([...s.watchers.map((w) => w.userId), ...s.roles.keys()])].filter((u) => u !== me);
+  const picked = $("role-user").value;
+  $("role-user").replaceChildren(...people.map((u) => new Option(u, u)));
+  if (people.includes(picked)) $("role-user").value = picked;
+  $("role-btn").disabled = people.length === 0;
   $("pass").hidden = !driving;
   const others = s.watchers.map((w) => w.userId).filter((u) => u !== me);
   $("pass-to").replaceChildren(...others.map((u) => new Option(u, u)));
@@ -230,7 +322,9 @@ function refresh() {
   $("pause").hidden = Boolean(s.paused);
   $("resume").hidden = !s.paused || !driving;
   $("paused-by").textContent = s.paused ? `Paused by ${s.paused}` : "";
-  $("text").placeholder = driving ? "Tell the agent what to do" : `Suggest something to ${s.driver}`;
+  $("text").placeholder = !canSteer
+    ? "Viewers can watch but not steer"
+    : driving ? "Tell the agent what to do" : `Suggest something to ${s.driver}`;
 
   for (const [seq, author] of s.queued) setActions(seq, "queued", author === me ? [["Withdraw", `events/${seq}/withdraw`]] : []);
   for (const [seq, author] of s.suggestions) {
@@ -239,7 +333,18 @@ function refresh() {
     if (author === me) acts.push(["Withdraw", `events/${seq}/withdraw`]);
     setActions(seq, "pending", acts);
   }
-  $("working").hidden = !agentBusy();
+  for (const [id, a] of s.approvals) {
+    const canApprove = RANK[myRole] >= RANK[a.minRole] && (a.allowSelf || me !== a.requestedFor);
+    const acts = [];
+    if (canApprove) acts.push(["Approve", `approvals/${id}/approve`]);
+    if (canApprove || me === a.requestedFor) {
+      acts.push(["Deny", `approvals/${id}/deny`, () => ({ reason: prompt("Why? The agent will see this.") ?? "" })]);
+    }
+    setActions(a.seq, "waiting", acts);
+  }
+  const waiting = s.approvals.size > 0 && !s.paused;
+  $("working").hidden = !waiting && !agentBusy();
+  $("working").textContent = waiting ? "Agent is waiting for an approval…" : "Agent is working…";
 }
 
 function setActions(seq, tag, actions) {
@@ -251,10 +356,10 @@ function setActions(seq, tag, actions) {
   meta.append(el("span", "tag", tag));
   if (!actions.length) return;
   const box = el("span", "actions");
-  for (const [label, path] of actions) {
+  for (const [label, path, makeBody] of actions) {
     const b = el("button", null, label);
     b.type = "button";
-    b.addEventListener("click", () => act(path));
+    b.addEventListener("click", () => act(path, makeBody?.()));
     box.append(b);
   }
   meta.append(box);

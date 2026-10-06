@@ -2,19 +2,19 @@
 
 A coding agent session that several engineers can watch, steer and hand off, like a teammate. Built as an answer to YC's Fall 2026 "Multiplayer AI" request.
 
-The angle: **the agent acts as whoever steered it.** Every action records the human whose instruction caused it. Later steps use that to run commits and PR comments under that person's identity, and to scope approvals by role. Shipping products like Cursor's shared cloud agents run every follow-up on the session creator's credentials.
+The angle: **the agent acts as whoever steered it.** Every action records the human whose instruction caused it, and acts on it: a commit the agent makes while Bob is steering is authored by Bob, with Bob's token, and a push to main waits for a maintainer who isn't Bob. Shipping products like Cursor's shared cloud agents run every follow-up on the session creator's credentials.
 
 ## Status
 
-Steps 1 to 3 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it.
+Steps 1 to 4 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it and whose name its actions carry.
 
 | Step | What | State |
 |---|---|---|
 | 1 | Durable agent loop + append-only Postgres event log | done |
 | 2 | Live fan-out to clients (SSE), presence, late-join replay | done |
 | 3 | Driver role, suggestions, pause, withdrawal, conflict tests | done |
-| 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | next |
-| 5 | Handoff summaries | |
+| 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | done |
+| 5 | Handoff summaries | next |
 | 6 | Two-window demo and conflict write-up | |
 
 ## How it works
@@ -48,7 +48,25 @@ Two mechanisms make these hold under concurrency:
 1. **Commands are decided under the session's row lock.** Each one locks the session, folds the log as it stands, checks the rules and appends in the same transaction. If Alice sends an instruction at the same instant she hands the wheel to Bob, one of them commits first and the other is judged against it: the instruction either lands first and the handoff withdraws it, or lands second and is only a suggestion.
 2. **The agent's steps are compare-and-swap.** A model call can take minutes, and in that time someone may pause, hand off or withdraw the very instruction the model is answering. Each of those bumps the session's `control_seq`. A model response or tool start is committed only if `control_seq` hasn't moved past what the step was planned from; otherwise it's discarded and the worker re-plans from the log. New messages don't count: they simply queue for the next step. Model calls have no side effects, so throwing one away is always safe.
 
-**Attribution.** Every event has `actor` (who wrote it: a user id or `agent`) and `on_behalf_of` (the human whose instruction the agent was serving). Tool code receives `onBehalfOf`, which is where per-user credentials plug in later.
+**Attribution.** Every event has `actor` (who wrote it: a user id or `agent`) and `on_behalf_of` (the human whose instruction the agent was serving). Tool code receives `onBehalfOf`, and acts as that person.
+
+**Acting as the steerer.** Each person connects their own GitHub account once (`PUT /me/github`); the token is encrypted with AES-256-GCM under `CREDENTIALS_KEY` and never leaves the server, never enters the log and never reaches the model. When the agent commits, pushes, opens a PR or comments, it uses the credentials of the person it is acting for, and nobody else's:
+
+- commits are **authored** by the steerer and **committed** by `Multiplayer Agent <agent@multiplayer-agent.invalid>`, with `Agent-Session:` and, when one was needed, `Approved-By:` trailers. The history says who asked for the change and that a machine made it.
+- pushes and GitHub API calls go out with the steerer's token. Git gets it through the environment, never argv, and anything git prints is scrubbed before it is logged.
+- if the steerer hasn't connected an account, the call fails and says so. There is no fallback to the session creator's token: borrowing someone else's identity is the thing this project exists to avoid.
+
+**Roles and approval gates.** Everyone in a session is a `viewer`, `member` or `maintainer`; the creator is a maintainer and anyone else is a member unless a maintainer says otherwise. Viewers can watch but not steer. A tool can declare that a particular call needs sign-off, as `git_push` does for the repository's default branch:
+
+```ts
+approval({ branch }, { defaultBranch }) {
+  return branch === defaultBranch
+    ? { minRole: "maintainer", allowSelf: false, reason: `pushes straight to ${defaultBranch}` }
+    : null;
+}
+```
+
+The worker appends `approval_requested` instead of running the call, and it sits there until someone decides. `allowSelf: false` means the person who steered cannot approve their own push, so a push to main always takes two people. Roles are checked when the approval is *granted*, not when it is requested, so demoting someone mid-flight takes effect. A denial reaches the model as the tool's result, with the reason, so the agent can try another way. Pausing cancels pending approvals along with the calls they belong to, and a decision is taken under the session row lock, so an approve and a deny racing each other resolve to exactly one.
 
 ## Run it
 
@@ -58,6 +76,7 @@ Needs Node 22+ and Postgres 16.
 npm install
 createdb mpagent && createdb mpagent_test
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/mpagent
+export CREDENTIALS_KEY=$(openssl rand -hex 32)   # encrypts people's GitHub tokens
 npm run migrate
 npm test
 
@@ -68,11 +87,13 @@ open "http://localhost:3000/?as=alice"   # start a session here
 open "http://localhost:3000/?as=bob"     # pick the same session here
 ```
 
-There is no login yet: `?as=<name>` says who you are. Real identity arrives with step 4.
+There is no login yet: `?as=<name>` says who you are, and that name is the identity everything else hangs off. Each person clicks **Connect GitHub** once and pastes a personal access token; after that the agent acts as whoever is steering. Without `CREDENTIALS_KEY` the server refuses to store tokens, and the git and GitHub tools refuse to act.
+
+A session can name a repository (`repoUrl` when you create one); the agent clones it as the person steering, or works in a fresh local repository if you leave it blank.
 
 The CLI still works without the browser: `npm run cli new alice "title"`, `npm run cli say <session> bob "text"`, `npm run cli log <session>`.
 
-The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and `write_file`, and paths are confined to that directory.
+The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and `write_file` (paths confined to that directory), plus `git_status`, `git_create_branch`, `git_commit`, `git_push`, `open_pull_request` and `comment_on_pull_request`.
 
 ## Tests
 
@@ -101,6 +122,21 @@ Everything runs against a real Postgres, with a scripted model in place of Claud
 - replaying the log rebuilds exactly the conversation the model saw
 - a tool call from a turn cut off at max_tokens is never run
 - tool paths can't escape the workspace
+
+`test/identity.test.ts`, identity and approvals, with a real git remote and a fake GitHub:
+
+- a handoff mid-session means the next commit is authored by the new driver, against a real repository
+- PRs and comments go out with the steerer's own token, never the session creator's
+- the agent refuses to act for someone without credentials rather than borrowing another person's
+- no token appears in the event log, in a tool's output or in the model's prompt, and the stored token is encrypted at rest
+- a push to main waits: a member can't approve, the person who asked can't approve themselves, and a second maintainer's approval lets it through as the original steerer
+- an approve and a deny racing each other apply exactly one decision (5 races)
+- a denial reaches the model with its reason, and nothing is pushed
+- pausing cancels a pending approval
+- the approver's role is checked when they approve, not when the request was made
+- a push to any other branch isn't gated
+- the HTTP API enforces the same rules, and a server with no key refuses to store a token
+- only maintainers change roles, the last maintainer can't be demoted, and viewers can watch but not steer
 
 `test/stream.test.ts`, streaming and presence over real HTTP:
 

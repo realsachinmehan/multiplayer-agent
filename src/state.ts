@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { SessionEvent } from "./events.js";
+import { DEFAULT_ROLE, type ApprovalPolicy, type Role } from "./roles.js";
 
 type Message = Anthropic.Beta.BetaMessageParam;
 type ToolUse = Anthropic.Beta.BetaToolUseBlock;
@@ -10,7 +11,12 @@ export type NextAction =
   | { kind: "call_model" }
   // A tool the model asked for that hasn't finished. resumed is true when a
   // previous worker logged tool_started and then died before tool_finished.
-  | { kind: "run_tool"; toolUse: ToolUse; resumed: boolean };
+  // approvedBy is set once someone signed off on a gated call.
+  | { kind: "run_tool"; toolUse: ToolUse; resumed: boolean; approvedBy: string | null; approvalRequested: boolean }
+  // The next tool call is waiting for someone to approve or deny it.
+  | { kind: "awaiting_approval"; toolUseId: string };
+
+export type PendingApproval = ApprovalPolicy & { toolUseId: string; tool: string; input: unknown; requestedFor: string };
 
 /** An instruction on the log that the agent hasn't read yet. */
 export type Queued = { seq: number; text: string; author: string; suggestedBy?: string };
@@ -29,6 +35,9 @@ export type SessionState = {
   paused: boolean;
   queued: Queued[];
   suggestions: Suggestion[];
+  approvals: PendingApproval[];
+  roleOf(user: string): Role;
+  roles: Record<string, Role>;
 };
 
 /**
@@ -52,6 +61,9 @@ export function fold(events: SessionEvent[]): SessionState {
   let driver: string | null = null;
   let paused = false;
   let lastSeq = 0;
+  const roles = new Map<string, Role>();
+  const requested = new Map<string, PendingApproval>();
+  const granted = new Map<string, string>();
 
   const flushUserTurn = (upToSeq: number) => {
     const seen = queued.filter((q) => q.seq <= upToSeq);
@@ -71,7 +83,26 @@ export function fold(events: SessionEvent[]): SessionState {
     switch (e.type) {
       case "session_created":
         driver = e.actor;
+        roles.set(e.actor, "maintainer");
         break;
+      case "role_changed":
+        roles.set(e.payload.user, e.payload.role);
+        break;
+      case "approval_requested": {
+        const { toolUseId, tool, input, requestedFor, minRole, allowSelf, reason } = e.payload;
+        requested.set(toolUseId, { toolUseId, tool, input, requestedFor, minRole, allowSelf, reason });
+        break;
+      }
+      case "approval_granted":
+        granted.set(e.payload.toolUseId, e.actor);
+        break;
+      case "approval_denied": {
+        const t = openToolUses.find((t) => t.id === e.payload.toolUseId);
+        if (t) toolError(t, `not run: ${e.actor} denied it${e.payload.reason ? `: ${e.payload.reason}` : ""}`);
+        openToolUses = openToolUses.filter((t) => t.id !== e.payload.toolUseId);
+        requested.delete(e.payload.toolUseId);
+        break;
+      }
       case "user_message":
         queued.push({ seq: e.seq, text: e.payload.text, author: e.actor, suggestedBy: e.payload.suggestedBy });
         if (e.payload.suggestionSeq != null) suggestions.delete(e.payload.suggestionSeq);
@@ -95,6 +126,7 @@ export function fold(events: SessionEvent[]): SessionState {
         // One already running finishes and reports; it is never cut off.
         for (const t of openToolUses.filter((t) => !started.has(t.id))) {
           toolError(t, `not run: ${e.actor} paused the session before this started`);
+          requested.delete(t.id);
         }
         openToolUses = openToolUses.filter((t) => started.has(t.id));
         break;
@@ -124,6 +156,7 @@ export function fold(events: SessionEvent[]): SessionState {
           is_error: e.payload.isError,
         });
         openToolUses = openToolUses.filter((t) => t.id !== e.payload.toolUseId);
+        requested.delete(e.payload.toolUseId);
         break;
     }
   }
@@ -131,7 +164,12 @@ export function fold(events: SessionEvent[]): SessionState {
   let next: NextAction;
   if (openToolUses.length) {
     const t = openToolUses[0];
-    next = { kind: "run_tool", toolUse: t, resumed: started.has(t.id) };
+    const approvedBy = granted.get(t.id) ?? null;
+    if (requested.has(t.id) && !approvedBy) {
+      next = { kind: "awaiting_approval", toolUseId: t.id };
+    } else {
+      next = { kind: "run_tool", toolUse: t, resumed: started.has(t.id), approvedBy, approvalRequested: requested.has(t.id) };
+    }
   } else if (paused) {
     next = { kind: "idle" };
   } else if (toolResults.length || queued.length) {
@@ -144,7 +182,19 @@ export function fold(events: SessionEvent[]): SessionState {
   // Show the pending turn as the next model call would send it.
   if (next.kind === "call_model") flushUserTurn(lastSeq);
 
-  return { lastSeq, messages, next, steerer, driver, paused, queued: pending, suggestions: [...suggestions.values()] };
+  return {
+    lastSeq,
+    messages,
+    next,
+    steerer,
+    driver,
+    paused,
+    queued: pending,
+    suggestions: [...suggestions.values()],
+    approvals: [...requested.values()].filter((a) => !granted.has(a.toolUseId)),
+    roleOf: (user) => roles.get(user) ?? DEFAULT_ROLE,
+    roles: Object.fromEntries(roles),
+  };
 }
 
 function textBlock(q: Queued): Anthropic.Beta.BetaTextBlockParam {

@@ -1,8 +1,10 @@
 import { hostname } from "node:os";
+import { loadKey } from "./credentials.js";
 import { connect } from "./db.js";
 import { EVENTS_CHANNEL } from "./events.js";
 import { ClaudeModel } from "./model.js";
 import { sessionsNeedingWork } from "./sessions.js";
+import { gitTools } from "./git-tools.js";
 import { fileTools, registry } from "./tools.js";
 import { driveSession, type WorkerDeps } from "./worker.js";
 
@@ -13,7 +15,8 @@ const db = connect();
 const deps: WorkerDeps = {
   db,
   model: new ClaudeModel(),
-  tools: registry(fileTools),
+  tools: registry([...fileTools, ...gitTools]),
+  credentialsKey: process.env.CREDENTIALS_KEY ? loadKey() : undefined,
   workerId: `${hostname()}:${process.pid}`,
   workspaceRoot: process.env.WORKSPACE_ROOT ?? "workspaces",
 };
