@@ -21,6 +21,13 @@ export type WorkerDeps = {
 
 export type DriveResult = "idle" | "busy" | "max_steps";
 
+/**
+ * The step was planned against a state that a person has since changed (a
+ * pause, a handoff, a withdrawal). Its result is discarded and the worker
+ * plans again from the log.
+ */
+export class StaleStepError extends Error {}
+
 const DEFAULT_SYSTEM = `You are a coding agent working in a shared session. Several engineers can watch and send you instructions; each instruction is prefixed with the sender's name in brackets. If two instructions conflict, say so rather than silently picking one. Use the tools to read and change files in the repository.`;
 
 /**
@@ -55,8 +62,12 @@ export async function driveSession(deps: WorkerDeps, sessionId: string): Promise
         if (rowCount === 1) return "idle";
         continue;
       }
-      if (state.next.kind === "call_model") await modelStep(deps, lease, state);
-      else await toolStep(deps, lease, state, workspace);
+      try {
+        if (state.next.kind === "call_model") await modelStep(deps, lease, state);
+        else await toolStep(deps, lease, state, workspace);
+      } catch (err) {
+        if (!(err instanceof StaleStepError)) throw err;
+      }
     }
     return "max_steps";
   } finally {
@@ -67,7 +78,8 @@ export async function driveSession(deps: WorkerDeps, sessionId: string): Promise
 
 async function modelStep(deps: WorkerDeps, lease: Lease, state: SessionState): Promise<void> {
   // If the worker dies during this call nothing has been written, so the
-  // next worker simply asks again. Model calls have no side effects.
+  // next worker simply asks again. Model calls have no side effects, which
+  // is also why a response can be thrown away if it went stale meanwhile.
   const res = await deps.model.next({
     system: deps.system ?? DEFAULT_SYSTEM,
     tools: [...deps.tools.values()].map((t) => t.definition),
@@ -84,7 +96,15 @@ async function modelStep(deps: WorkerDeps, lease: Lease, state: SessionState): P
         payload: { content: res.content, stopReason: res.stopReason, basedOnSeq: state.lastSeq },
       },
     ],
-    lease,
+    {
+      fence: lease,
+      // New messages can land while the model thinks; they just queue. But
+      // if someone paused, handed off or withdrew something in that time,
+      // this response answers a situation that no longer exists.
+      check: (_c, s) => {
+        if (s.controlSeq > state.lastSeq) throw new StaleStepError();
+      },
+    },
   );
 }
 
@@ -94,13 +114,16 @@ async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, wor
   const tool = deps.tools.get(toolUse.name);
   const meta = { actor: AGENT, onBehalfOf: state.steerer };
   const finish = (output: string, isError: boolean) =>
-    append(deps.db, lease.sessionId, [{ type: "tool_finished", ...meta, payload: { toolUseId: toolUse.id, output, isError } }], lease);
+    append(deps.db, lease.sessionId, [{ type: "tool_finished", ...meta, payload: { toolUseId: toolUse.id, output, isError } }], {
+      fence: lease,
+    });
 
   if (!tool) return void (await finish(`unknown tool: ${toolUse.name}`, true));
 
-  if (resumed && !tool.idempotent) {
+  if (resumed && (!tool.idempotent || state.paused)) {
     // The previous worker started this call and never recorded the result.
-    // Running it again could double a side effect, so report it instead.
+    // Running it again could double a side effect, and a paused session
+    // runs nothing new, so report it instead.
     return void (await finish(
       `${toolUse.name} was interrupted by a worker restart; it may or may not have taken effect. Check before retrying.`,
       true,
@@ -112,7 +135,14 @@ async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, wor
       deps.db,
       lease.sessionId,
       [{ type: "tool_started", ...meta, payload: { toolUseId: toolUse.id, name: toolUse.name, input: toolUse.input } }],
-      lease,
+      {
+        fence: lease,
+        // A pause that landed after we read the log cancelled this call,
+        // even if a resume followed it. Re-read instead of starting it.
+        check: (_c, s) => {
+          if (s.controlSeq > state.lastSeq) throw new StaleStepError();
+        },
+      },
     );
   }
 

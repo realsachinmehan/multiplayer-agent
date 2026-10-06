@@ -7,7 +7,9 @@ import type { Db } from "./db.js";
 import { readEvents } from "./events.js";
 import { Hub } from "./hub.js";
 import * as presence from "./presence.js";
-import { createSession, postMessage } from "./sessions.js";
+import * as commands from "./commands.js";
+import { CommandError } from "./commands.js";
+import { createSession } from "./sessions.js";
 
 export type ServerOpts = {
   port?: number;
@@ -84,7 +86,7 @@ export async function startServer(db: Db, opts: ServerOpts = {}): Promise<Runnin
       await route(req, res, url);
     } catch (err) {
       if (res.headersSent) return void res.end();
-      if (err instanceof HttpError) return json(res, err.status, { error: err.message });
+      if (err instanceof HttpError || err instanceof CommandError) return json(res, err.status, { error: err.message });
       console.error(err);
       json(res, 500, { error: "internal error" });
     }
@@ -113,17 +115,37 @@ export async function startServer(db: Db, opts: ServerOpts = {}): Promise<Runnin
       return json(res, 201, { id: await createSession(db, { title: title.trim(), createdBy: user }) });
     }
 
-    const m = path.match(/^\/sessions\/([^/]+)\/(messages|events|stream)$/);
+    const m = path.match(/^\/sessions\/([^/]+)\/(.+)$/);
     if (!m) throw new HttpError(404, "not found");
     const [, sessionId, what] = m;
     if (!(await sessionExists(db, sessionId))) throw new HttpError(404, "no such session");
 
-    if (what === "messages" && req.method === "POST") {
+    if (req.method === "POST") {
       const user = identify(req, url);
-      const { text } = await body(req);
-      if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "text is required");
-      const e = await postMessage(db, sessionId, user, text.trim());
-      return json(res, 201, { seq: e.seq });
+      const done = (events: { seq: number; type: string } | { seq: number; type: string }[]) =>
+        json(res, 201, [events].flat().map((e) => ({ seq: e.seq, type: e.type })));
+
+      if (what === "messages") {
+        const { text } = await body(req);
+        if (typeof text !== "string" || !text.trim()) throw new HttpError(400, "text is required");
+        return done(await commands.postMessage(db, sessionId, user, text.trim()));
+      }
+      const target = what.match(/^(suggestions|events)\/(\d+)\/(accept|dismiss|withdraw)$/);
+      if (target) {
+        const [, kind, seq, action] = target;
+        if (kind === "suggestions" && action === "accept") return done(await commands.acceptSuggestion(db, sessionId, user, Number(seq)));
+        if (kind === "suggestions" && action === "dismiss") return done(await commands.dismissSuggestion(db, sessionId, user, Number(seq)));
+        if (kind === "events" && action === "withdraw") return done(await commands.withdraw(db, sessionId, user, Number(seq)));
+      }
+      if (what === "driver") {
+        const { to } = await body(req);
+        if (typeof to !== "string" || !USER_ID.test(to)) throw new HttpError(400, "to must name a user");
+        return done(await commands.passDriver(db, sessionId, user, to));
+      }
+      if (what === "driver/claim") return done(await commands.claimDriver(db, sessionId, user));
+      if (what === "pause") return done(await commands.pause(db, sessionId, user));
+      if (what === "resume") return done(await commands.resume(db, sessionId, user));
+      throw new HttpError(404, "not found");
     }
 
     if (what === "events" && req.method === "GET") {

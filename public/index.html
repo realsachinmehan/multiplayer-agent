@@ -14,6 +14,18 @@
     <button id="new">New session</button>
     <div id="watchers" aria-label="Watching now"></div>
   </header>
+  <nav id="controls" hidden>
+    <span id="driver"></span>
+    <button id="claim" type="button" hidden>Take the wheel</button>
+    <span id="pass" hidden>
+      <select id="pass-to"></select>
+      <button id="pass-btn" type="button">Pass the wheel</button>
+    </span>
+    <span id="paused-by"></span>
+    <button id="pause" type="button">Pause agent</button>
+    <button id="resume" type="button" hidden>Resume</button>
+    <span id="error" role="alert"></span>
+  </nav>
   <main id="log" aria-live="polite"><p class="empty">Pick or start a session.</p></main>
   <footer>
     <div id="working" hidden>Agent is working…</div>

@@ -10,7 +10,7 @@
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr auto;
+  margin: 0; height: 100vh; display: grid; grid-template-rows: auto auto 1fr auto;
   background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif;
 }
 header, footer { padding: 10px 16px; border-color: var(--line); background: var(--card); }
@@ -34,3 +34,14 @@ details pre { white-space: pre-wrap; margin: 4px 0 0; max-height: 240px; overflo
 #working { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 #composer { display: flex; gap: 8px; }
 #text { flex: 1; }
+nav { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+nav[hidden] { display: none; }
+#error { color: var(--error); }
+#paused-by { color: var(--error); font-weight: 600; }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); margin-left: 6px; }
+.suggestion .msg { border-style: dashed; }
+.resolved .msg { opacity: .55; }
+.withdrawn .msg { text-decoration: line-through; }
+.actions { display: inline-flex; gap: 6px; margin-left: 8px; }
+.actions button { font-size: 12px; padding: 1px 8px; }
+.who.driver::before { content: "◆ "; }

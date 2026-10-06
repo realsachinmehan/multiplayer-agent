@@ -6,14 +6,14 @@ The angle: **the agent acts as whoever steered it.** Every action records the hu
 
 ## Status
 
-Steps 1 and 2 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching.
+Steps 1 to 3 of 6 are built: a durable agent loop on an append-only event log, streamed live to everyone watching, with rules for who steers it.
 
 | Step | What | State |
 |---|---|---|
 | 1 | Durable agent loop + append-only Postgres event log | done |
 | 2 | Live fan-out to clients (SSE), presence, late-join replay | done |
-| 3 | Driver role, instruction queue, interrupt, two-user conflict tests | next |
-| 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | |
+| 3 | Driver role, suggestions, pause, withdrawal, conflict tests | done |
+| 4 | Per-steerer identity on commits and PR comments, role-scoped approvals | next |
 | 5 | Handoff summaries | |
 | 6 | Two-window demo and conflict write-up | |
 
@@ -35,6 +35,18 @@ Steps 1 and 2 of 6 are built: a durable agent loop on an append-only event log, 
 Fan-out uses Postgres `LISTEN/NOTIFY`, with no Redis. Each append sends a notification carrying only the session id, and every server process listening wakes its subscribers, which re-read the log from their cursor. The notification is just a doorbell and the log is the source of truth, so a lost notification costs latency, never correctness. Any number of server processes can serve the same session.
 
 **Presence.** Each open stream holds a row in `presence` that it heartbeats. Watchers get a fresh snapshot (who, and how many tabs) whenever someone arrives or leaves. A server that dies without cleaning up leaves rows that expire, and the next sweep removes them and tells the session. Presence is kept out of the event log on purpose: it is live state, not session history.
+
+**Steering rules.** Several people talking to one agent at once is the core design problem. The rules are in `src/commands.ts`:
+
+- **One driver at a time.** The session's creator drives first. The driver's messages are instructions; everyone else's are suggestions that show up for all to see, and the agent only acts on one once the driver accepts it. An accepted suggestion reaches the model as `[bob, accepted by alice] ...` and runs with Alice's authority.
+- **Handoff.** The driver can pass the wheel to anyone, and anyone can take it once the driver has left the session. Instructions the old driver queued that the agent hasn't read yet are withdrawn, because they carried the old driver's authority. Pending suggestions carry over to the new driver.
+- **Pause.** Anyone can pause. A tool that is already running finishes and reports, because cutting it off mid-side-effect is worse, and tool calls that haven't started are cancelled. Only the driver can resume.
+- **Withdraw.** You can take back your own instruction until the agent reads it, or your own suggestion until it's resolved.
+
+Two mechanisms make these hold under concurrency:
+
+1. **Commands are decided under the session's row lock.** Each one locks the session, folds the log as it stands, checks the rules and appends in the same transaction. If Alice sends an instruction at the same instant she hands the wheel to Bob, one of them commits first and the other is judged against it: the instruction either lands first and the handoff withdraws it, or lands second and is only a suggestion.
+2. **The agent's steps are compare-and-swap.** A model call can take minutes, and in that time someone may pause, hand off or withdraw the very instruction the model is answering. Each of those bumps the session's `control_seq`. A model response or tool start is committed only if `control_seq` hasn't moved past what the step was planned from; otherwise it's discarded and the worker re-plans from the log. New messages don't count: they simply queue for the next step. Model calls have no side effects, so throwing one away is always safe.
 
 **Attribution.** Every event has `actor` (who wrote it: a user id or `agent`) and `on_behalf_of` (the human whose instruction the agent was serving). Tool code receives `onBehalfOf`, which is where per-user credentials plug in later.
 
@@ -65,6 +77,19 @@ The agent works in `workspaces/<session-id>/` with `list_files`, `read_file` and
 ## Tests
 
 Everything runs against a real Postgres, with a scripted model in place of Claude.
+
+`test/steering.test.ts`, the conflict cases:
+
+- a non-driver's message is a suggestion the model never sees until the driver accepts it
+- an accept, a dismiss and a second accept racing on one suggestion: exactly one applies
+- only the driver can accept, dismiss, pass or resume; anyone can pause
+- a handoff withdraws the old driver's unread instructions and keeps pending suggestions
+- a model turn planned before a handoff, a pause or a withdrawal is discarded
+- an instruction sent at the same moment as a handoff never reaches the agent with the old driver's authority (20 races)
+- two people claiming an abandoned wheel at once: one wins; nobody can claim while the driver is present
+- a pause lets the running tool finish, cancels the rest, and nothing runs until the driver resumes
+- an instruction can be withdrawn until the agent reads it, and not after
+- three simulated people pause, resume, suggest, accept and hand off at random while the agent runs. The test checks that every instruction came from the driver of the moment, that no tool started while paused, and that the conversation is still one the API accepts. This test found a real race: a pause followed quickly by a resume could let a cancelled tool start anyway.
 
 `test/loop.test.ts`, the agent loop:
 
