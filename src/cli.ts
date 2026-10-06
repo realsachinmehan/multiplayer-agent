@@ -1,6 +1,7 @@
 import { connect } from "./db.js";
 import { readEvents } from "./events.js";
-import { createSession, postMessage } from "./sessions.js";
+import { postMessage } from "./commands.js";
+import { createSession } from "./sessions.js";
 
 // Usage:
 //   cli new <user> <title>

@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db.js";
 import { AGENT, append, LeaseLostError, readEvents, type SessionEvent } from "../src/events.js";
 import { acquireLease } from "../src/lease.js";
-import { createSession, postMessage, sessionsNeedingWork } from "../src/sessions.js";
+import { postMessage } from "../src/commands.js";
+import { createSession, sessionsNeedingWork } from "../src/sessions.js";
 import { fold } from "../src/state.js";
 import type { Tool } from "../src/tools.js";
 import { driveSession } from "../src/worker.js";
@@ -60,8 +61,8 @@ describe("agent loop", () => {
     await postMessage(db, sid, "alice", "rename foo to bar");
     const model = new ScriptedModel([
       async () => {
-        // Bob speaks up while the model is still thinking about Alice's ask.
-        await postMessage(db, sid, "bob", "actually call it baz");
+        // Alice changes her mind while the model is still thinking.
+        await postMessage(db, sid, "alice", "actually call it baz");
         return say("renaming foo to bar");
       },
       say("switching to baz"),
@@ -73,15 +74,13 @@ describe("agent loop", () => {
     expect(JSON.stringify(first.messages)).not.toContain("baz");
     expect(second.messages.at(-1)).toEqual({
       role: "user",
-      content: [{ type: "text", text: "[bob] actually call it baz" }],
+      content: [{ type: "text", text: "[alice] actually call it baz" }],
     });
 
-    // In the log Bob's message precedes the first reply, but the folded
+    // In the log the second message precedes the first reply, but the folded
     // conversation places it after, where the model actually read it.
     const state = fold(await readEvents(db, sid));
     expect(state.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
-    const responses = (await readEvents(db, sid)).filter((e) => e.type === "model_response");
-    expect(responses.map((e) => e.onBehalfOf)).toEqual(["alice", "bob"]);
   });
 
   it("does not go idle when a message lands between the last read and the idle check", async () => {
@@ -89,7 +88,7 @@ describe("agent loop", () => {
     await postMessage(db, sid, "alice", "hi");
     const model = new ScriptedModel([say("hello"), say("hello bob")]);
     const d = deps(db, model);
-    // Slip Bob's message in right after the model's reply is appended, before
+    // Slip a second message in right after the model's reply is appended, before
     // the worker's next read decides it is idle.
     const realNext = model.next.bind(model);
     let injected = false;
@@ -97,14 +96,14 @@ describe("agent loop", () => {
       const res = await realNext(req);
       if (!injected) {
         injected = true;
-        setImmediate(() => void postMessage(db, sid, "bob", "and me?"));
+        setImmediate(() => void postMessage(db, sid, "alice", "and one more thing"));
       }
       return res;
     };
 
     expect(await driveSession(d, sid)).toBe("idle");
-    await waitFor(async () => (await readEvents(db, sid)).some((e) => e.actor === "bob"));
-    // Either the same run answered Bob, or the session is pending for the next worker.
+    await waitFor(async () => (await readEvents(db, sid)).some((e) => e.type === "user_message" && e.payload.text === "and one more thing"));
+    // Either the same run answered it, or the session is pending for the next worker.
     const state = fold(await readEvents(db, sid));
     const { rows } = await db.query("SELECT status FROM sessions WHERE id = $1", [sid]);
     expect(state.next.kind === "idle" || rows[0].status === "pending").toBe(true);
@@ -186,8 +185,8 @@ describe("event log", () => {
     expect(b!.epoch).toBe(a!.epoch + 1);
 
     const write = { type: "user_message" as const, actor: AGENT, payload: { text: "x" } };
-    await expect(append(db, sid, [write], a!)).rejects.toBeInstanceOf(LeaseLostError);
-    await expect(append(db, sid, [write], b!)).resolves.toHaveLength(1);
+    await expect(append(db, sid, [write], { fence: a! })).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(append(db, sid, [write], { fence: b! })).resolves.toHaveLength(1);
   });
 
   it("lets a late joiner rebuild exactly the conversation the model saw", async () => {

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db.js";
 import { startServer, type RunningServer } from "../src/server.js";
-import { createSession, postMessage } from "../src/sessions.js";
+import { postMessage } from "../src/commands.js";
+import { createSession } from "../src/sessions.js";
 import { driveSession } from "../src/worker.js";
 import { deps, say, ScriptedModel, testDb, toolUse } from "./helpers.js";
 import { SseClient } from "./sse.js";
@@ -169,7 +170,8 @@ describe("http api", () => {
     const res = await post(server, sid, "bob", "hello");
     expect(res.status).toBe(201);
     const events = await (await fetch(`${server.url}/sessions/${sid}/events?after=1`)).json();
-    expect(events).toMatchObject([{ seq: 2, actor: "bob", type: "user_message", payload: { text: "hello" } }]);
+    // Bob isn't driving, so his message is a suggestion for Alice.
+    expect(events).toMatchObject([{ seq: 2, actor: "bob", type: "suggestion", payload: { text: "hello" } }]);
   });
 
   it("404s on a session that doesn't exist", async () => {
