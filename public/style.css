@@ -45,3 +45,12 @@ nav[hidden] { display: none; }
 .actions { display: inline-flex; gap: 6px; margin-left: 8px; }
 .actions button { font-size: 12px; padding: 1px 8px; }
 .who.driver::before { content: "◆ "; }
+.who .role { opacity: .75; }
+.who.viewer { background: var(--muted); }
+.approval .msg { border: 1px solid var(--accent); }
+dialog { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; max-width: 440px; }
+dialog form { display: flex; flex-direction: column; gap: 10px; }
+dialog h3 { margin: 0; }
+dialog p { margin: 0; color: var(--muted); font-size: 13px; }
+dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }

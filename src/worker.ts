@@ -4,9 +4,12 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { Db } from "./db.js";
 import { AGENT, append, LeaseLostError, readEvents } from "./events.js";
 import { acquireLease, releaseLease, renewLease, type Lease } from "./lease.js";
+import { loadCredentials, type Credentials } from "./credentials.js";
+import { ensureRepo } from "./git-tools.js";
+import { RestGitHub, type GitHubApi } from "./github.js";
 import type { Model } from "./model.js";
 import { fold, type SessionState } from "./state.js";
-import type { ToolRegistry } from "./tools.js";
+import type { ToolContext, ToolRegistry } from "./tools.js";
 
 export type WorkerDeps = {
   db: Db;
@@ -17,7 +20,13 @@ export type WorkerDeps = {
   leaseTtlMs?: number;
   maxSteps?: number;
   system?: string;
+  // Decrypts people's stored credentials. Without it nobody has any, and
+  // tools that act on someone's behalf refuse to run.
+  credentialsKey?: Buffer;
+  github?: GitHubApi;
 };
+
+type SessionInfo = { workspace: string; repo: ToolContext["repo"] };
 
 export type DriveResult = "idle" | "busy" | "max_steps";
 
@@ -40,9 +49,13 @@ export async function driveSession(deps: WorkerDeps, sessionId: string): Promise
   const ttl = deps.leaseTtlMs ?? 30_000;
   const lease = await acquireLease(deps.db, sessionId, deps.workerId, ttl);
   if (!lease) return "busy";
-  await deps.db.query("UPDATE sessions SET status = 'running' WHERE id = $1", [sessionId]);
+  const { rows } = await deps.db.query(
+    "UPDATE sessions SET status = 'running' WHERE id = $1 RETURNING repo_url, default_branch",
+    [sessionId],
+  );
   const workspace = join(deps.workspaceRoot, sessionId);
   await mkdir(workspace, { recursive: true });
+  const info: SessionInfo = { workspace, repo: { url: rows[0].repo_url, defaultBranch: rows[0].default_branch } };
   // A model call or tool can outlast the TTL, so keep the lease alive in the
   // background. If renewal fails the fence stops our next write anyway.
   const heartbeat = setInterval(() => void renewLease(deps.db, lease, ttl).catch(() => {}), ttl / 3);
@@ -52,7 +65,9 @@ export async function driveSession(deps: WorkerDeps, sessionId: string): Promise
       if (!(await renewLease(deps.db, lease, ttl))) throw new LeaseLostError(sessionId, lease.epoch);
       const state = fold(await readEvents(deps.db, sessionId));
 
-      if (state.next.kind === "idle") {
+      // Waiting for a person to approve the next call is idle as far as the
+      // worker is concerned; their decision wakes it again.
+      if (state.next.kind === "idle" || state.next.kind === "awaiting_approval") {
         // Only go idle if nothing arrived since we read the log; otherwise a
         // message posted in that gap would sit unanswered.
         const { rowCount } = await deps.db.query(
@@ -64,7 +79,7 @@ export async function driveSession(deps: WorkerDeps, sessionId: string): Promise
       }
       try {
         if (state.next.kind === "call_model") await modelStep(deps, lease, state);
-        else await toolStep(deps, lease, state, workspace);
+        else await toolStep(deps, lease, state, info);
       } catch (err) {
         if (!(err instanceof StaleStepError)) throw err;
       }
@@ -108,9 +123,9 @@ async function modelStep(deps: WorkerDeps, lease: Lease, state: SessionState): P
   );
 }
 
-async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, workspace: string): Promise<void> {
+async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, info: SessionInfo): Promise<void> {
   if (state.next.kind !== "run_tool") return;
-  const { toolUse, resumed } = state.next;
+  const { toolUse, resumed, approvedBy, approvalRequested } = state.next;
   const tool = deps.tools.get(toolUse.name);
   const meta = { actor: AGENT, onBehalfOf: state.steerer };
   const finish = (output: string, isError: boolean) =>
@@ -130,6 +145,31 @@ async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, wor
     ));
   }
 
+  const policy = tool.approval?.(toolUse.input, { defaultBranch: info.repo.defaultBranch }) ?? null;
+  if (policy && !approvedBy && !resumed) {
+    if (approvalRequested) return;
+    // Ask instead of acting. The session waits until someone with the
+    // right role approves or denies; see commands.approve.
+    await append(
+      deps.db,
+      lease.sessionId,
+      [
+        {
+          type: "approval_requested",
+          ...meta,
+          payload: { toolUseId: toolUse.id, tool: toolUse.name, input: toolUse.input, requestedFor: state.steerer ?? "", ...policy },
+        },
+      ],
+      {
+        fence: lease,
+        check: (_c, s) => {
+          if (s.controlSeq > state.lastSeq) throw new StaleStepError();
+        },
+      },
+    );
+    return;
+  }
+
   if (!resumed) {
     await append(
       deps.db,
@@ -146,14 +186,22 @@ async function toolStep(deps: WorkerDeps, lease: Lease, state: SessionState, wor
     );
   }
 
+  const key = deps.credentialsKey;
+  const ctx: ToolContext = {
+    sessionId: lease.sessionId,
+    workspace: info.workspace,
+    onBehalfOf: state.steerer,
+    approvedBy,
+    repo: info.repo,
+    credentials: async (user): Promise<Credentials | null> => (key ? loadCredentials(deps.db, key, user) : null),
+    github: deps.github ?? new RestGitHub(),
+  };
+
   let output: string;
   let isError = false;
   try {
-    output = await tool.run(toolUse.input as Anthropic.Beta.BetaToolUseBlock["input"], {
-      sessionId: lease.sessionId,
-      workspace,
-      onBehalfOf: state.steerer,
-    });
+    await ensureRepo(ctx);
+    output = await tool.run(toolUse.input as Anthropic.Beta.BetaToolUseBlock["input"], ctx);
   } catch (err) {
     output = err instanceof Error ? err.message : String(err);
     isError = true;

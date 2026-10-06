@@ -1,13 +1,21 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { Credentials } from "./credentials.js";
+import type { GitHubApi } from "./github.js";
+import type { ApprovalPolicy } from "./roles.js";
 
 export type ToolContext = {
   sessionId: string;
   workspace: string;
-  // The human whose instruction led to this call. Later steps use it to pick
-  // whose credentials a side effect goes out under.
+  // The human whose instruction led to this call. Side effects go out under
+  // this person's credentials and nobody else's.
   onBehalfOf: string | null;
+  // Who signed off, when the call needed approval.
+  approvedBy: string | null;
+  repo: { url: string | null; defaultBranch: string };
+  credentials(user: string): Promise<Credentials | null>;
+  github: GitHubApi;
 };
 
 export type Tool = {
@@ -15,6 +23,8 @@ export type Tool = {
   // Safe to run again if a worker crashed after starting it. A tool that is
   // not idempotent is never re-run; the model is told the outcome is unknown.
   idempotent: boolean;
+  // Returns a policy when this particular call needs someone's sign-off.
+  approval?(input: any, ctx: { defaultBranch: string }): ApprovalPolicy | null;
   run(input: any, ctx: ToolContext): Promise<string>;
 };
 

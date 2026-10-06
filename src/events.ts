@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
 import { withTx, type Db } from "./db.js";
+import type { ApprovalPolicy, Role } from "./roles.js";
 
 export type EventBody =
   | { type: "session_created"; payload: { title: string } }
@@ -14,6 +15,14 @@ export type EventBody =
   // Takes back an instruction the agent hasn't read yet, or a pending suggestion.
   | { type: "withdrawn"; payload: { targetSeq: number; reason: "author" | "driver_changed" } }
   | { type: "driver_changed"; payload: { from: string; to: string; reason: "passed" | "claimed" } }
+  | { type: "role_changed"; payload: { user: string; role: Role } }
+  // The agent wants to make a call that its policy says needs sign-off.
+  | {
+      type: "approval_requested";
+      payload: { toolUseId: string; tool: string; input: unknown; requestedFor: string } & ApprovalPolicy;
+    }
+  | { type: "approval_granted"; payload: { toolUseId: string } }
+  | { type: "approval_denied"; payload: { toolUseId: string; reason?: string } }
   | { type: "paused"; payload: Record<string, never> }
   | { type: "resumed"; payload: Record<string, never> }
   | {

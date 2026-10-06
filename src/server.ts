@@ -9,6 +9,8 @@ import { Hub } from "./hub.js";
 import * as presence from "./presence.js";
 import * as commands from "./commands.js";
 import { CommandError } from "./commands.js";
+import { hasCredentials, saveCredentials } from "./credentials.js";
+import type { Role } from "./roles.js";
 import { createSession } from "./sessions.js";
 
 export type ServerOpts = {
@@ -17,6 +19,8 @@ export type ServerOpts = {
   heartbeatMs?: number;
   // A presence row lives this long without a heartbeat.
   presenceTtlMs?: number;
+  // Encrypts the GitHub tokens people connect. Without it, connecting is off.
+  credentialsKey?: Buffer;
 };
 
 export type RunningServer = { url: string; hub: Hub; close(): Promise<void> };
@@ -110,9 +114,36 @@ export async function startServer(db: Db, opts: ServerOpts = {}): Promise<Runnin
 
     if (path === "/sessions" && req.method === "POST") {
       const user = identify(req, url);
-      const { title } = await body(req);
+      const { title, repoUrl, defaultBranch } = await body(req);
       if (typeof title !== "string" || !title.trim()) throw new HttpError(400, "title is required");
-      return json(res, 201, { id: await createSession(db, { title: title.trim(), createdBy: user }) });
+      if (repoUrl != null && (typeof repoUrl !== "string" || !/^https:\/\/\S+$/.test(repoUrl))) {
+        throw new HttpError(400, "repoUrl must be an https URL");
+      }
+      const id = await createSession(db, {
+        title: title.trim(),
+        createdBy: user,
+        repoUrl: repoUrl || undefined,
+        defaultBranch: typeof defaultBranch === "string" && defaultBranch ? defaultBranch : undefined,
+      });
+      return json(res, 201, { id });
+    }
+
+    if (path === "/me" && req.method === "GET") {
+      const user = identify(req, url);
+      return json(res, 200, { user, githubConnected: await hasCredentials(db, user) });
+    }
+
+    // Connect your own GitHub account. The token is encrypted at rest and
+    // only ever used for things the agent does at your request.
+    if (path === "/me/github" && req.method === "PUT") {
+      const user = identify(req, url);
+      if (!opts.credentialsKey) throw new HttpError(503, "this server has no CREDENTIALS_KEY, so it can't store tokens");
+      const { token, name, email } = await body(req);
+      if (typeof token !== "string" || token.length < 10) throw new HttpError(400, "token is required");
+      if (typeof name !== "string" || !name.trim()) throw new HttpError(400, "name is required");
+      if (typeof email !== "string" || !email.includes("@")) throw new HttpError(400, "email is required");
+      await saveCredentials(db, opts.credentialsKey, { userId: user, token, gitName: name.trim(), gitEmail: email.trim() });
+      return json(res, 200, { user, githubConnected: true });
     }
 
     const m = path.match(/^\/sessions\/([^/]+)\/(.+)$/);
@@ -143,6 +174,18 @@ export async function startServer(db: Db, opts: ServerOpts = {}): Promise<Runnin
         return done(await commands.passDriver(db, sessionId, user, to));
       }
       if (what === "driver/claim") return done(await commands.claimDriver(db, sessionId, user));
+      const approval = what.match(/^approvals\/([A-Za-z0-9_-]{1,100})\/(approve|deny)$/);
+      if (approval) {
+        const [, toolUseId, decision] = approval;
+        if (decision === "approve") return done(await commands.approve(db, sessionId, user, toolUseId));
+        const { reason } = await body(req);
+        return done(await commands.deny(db, sessionId, user, toolUseId, typeof reason === "string" ? reason.slice(0, 500) : undefined));
+      }
+      if (what === "roles") {
+        const { user: target, role } = await body(req);
+        if (typeof target !== "string" || !USER_ID.test(target)) throw new HttpError(400, "user must name a user");
+        return done(await commands.setRole(db, sessionId, user, target, role as Role));
+      }
       if (what === "pause") return done(await commands.pause(db, sessionId, user));
       if (what === "resume") return done(await commands.resume(db, sessionId, user));
       throw new HttpError(404, "not found");
