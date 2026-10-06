@@ -186,6 +186,11 @@ export async function startServer(db: Db, opts: ServerOpts = {}): Promise<Runnin
         if (typeof target !== "string" || !USER_ID.test(target)) throw new HttpError(400, "user must name a user");
         return done(await commands.setRole(db, sessionId, user, target, role as Role));
       }
+      if (what === "summaries") {
+        const { sinceSeq } = await body(req);
+        const r = await commands.requestSummary(db, sessionId, user, typeof sinceSeq === "number" ? sinceSeq : 0);
+        return json(res, r.existing ? 200 : 201, r);
+      }
       if (what === "pause") return done(await commands.pause(db, sessionId, user));
       if (what === "resume") return done(await commands.resume(db, sessionId, user));
       throw new HttpError(404, "not found");

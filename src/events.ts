@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
 import { withTx, type Db } from "./db.js";
+import type { HandoffFacts } from "./handoff.js";
 import type { ApprovalPolicy, Role } from "./roles.js";
 
 export type EventBody =
@@ -23,6 +24,26 @@ export type EventBody =
     }
   | { type: "approval_granted"; payload: { toolUseId: string } }
   | { type: "approval_denied"; payload: { toolUseId: string; reason?: string } }
+  // Someone needs a handoff note: the new driver at every handoff, or anyone
+  // who asks to catch up. sinceSeq is the last event they are assumed to know.
+  | { type: "summary_requested"; payload: { for: string; reason: "handoff" | "asked"; sinceSeq: number } }
+  // Written by a worker beside the agent loop. upToSeq is the last event the
+  // note saw; anything after it happened while the note was being written.
+  | {
+      type: "summary_ready";
+      payload: {
+        requestSeq: number;
+        for: string;
+        sinceSeq: number;
+        upToSeq: number;
+        // Computed from the log, so exact. text is the model's prose.
+        facts: HandoffFacts;
+        text: string;
+        // Citations the model made to events it never saw, removed from text.
+        droppedCitations: number[];
+      };
+    }
+  | { type: "summary_failed"; payload: { requestSeq: number; for: string; error: string } }
   | { type: "paused"; payload: Record<string, never> }
   | { type: "resumed"; payload: Record<string, never> }
   | {
